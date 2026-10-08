@@ -1,0 +1,11 @@
+{
+  "watch": ["**/*.js", "**/*.json"],
+  "ignore": [
+    "uploads/**",
+    "node_modules/**",
+    "**/.git/**"
+  ],
+  "ext": "js,json",
+  "delay": 250,
+  "signal": "SIGTERM"
+}
