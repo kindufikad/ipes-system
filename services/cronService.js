@@ -3,9 +3,11 @@ const pool = require('../config/db');
 const { getBotInstance } = require('../telegram-bot/src/services/notificationService');
 const { getDashboardUrl } = require('../telegram-bot/src/config');
 const { sendTelegramReminder } = require('../utils/telegramBot');
+const { lockExpiredEvaluationForms } = require('./evaluationDeadlineService');
 
 const CRON_TIMEZONE = process.env.TELEGRAM_CRON_TIMEZONE || 'Africa/Addis_Ababa';
 let reminderTask = null;
+let evaluationDeadlineTask = null;
 
 const getDateParts = (date, timezone = CRON_TIMEZONE) => {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -218,22 +220,36 @@ const sendPendingEvaluationReminders = async () => {
 };
 
 const startCronService = () => {
-  if (reminderTask) return reminderTask;
+  if (!reminderTask) {
+    reminderTask = cron.schedule('0 9 * * *', () => {
+      sendPendingEvaluationReminders().catch((error) => {
+        console.error('[TELEGRAM CRON] Daily reminder job failed:', error.message);
+      });
+    }, { timezone: CRON_TIMEZONE });
+    console.log(`[TELEGRAM CRON] Daily reminder job scheduled for 09:00 (${CRON_TIMEZONE}).`);
+  }
 
-  reminderTask = cron.schedule('0 9 * * *', () => {
-    sendPendingEvaluationReminders().catch((error) => {
-      console.error('[TELEGRAM CRON] Daily reminder job failed:', error.message);
-    });
-  }, { timezone: CRON_TIMEZONE });
+  if (!evaluationDeadlineTask) {
+    evaluationDeadlineTask = cron.schedule('* * * * *', () => {
+      lockExpiredEvaluationForms(pool).catch((error) => {
+        console.error('[EVALUATION DEADLINE CRON] Auto-lock sweep failed:', error.message);
+      });
+    }, { timezone: CRON_TIMEZONE });
+    console.log(`[EVALUATION DEADLINE CRON] Auto-lock sweep scheduled every minute (${CRON_TIMEZONE}).`);
+  }
 
-  console.log(`[TELEGRAM CRON] Daily reminder job scheduled for 09:00 (${CRON_TIMEZONE}).`);
   return reminderTask;
 };
 
 const stopCronService = () => {
-  if (!reminderTask) return;
-  reminderTask.stop();
-  reminderTask = null;
+  if (reminderTask) {
+    reminderTask.stop();
+    reminderTask = null;
+  }
+  if (evaluationDeadlineTask) {
+    evaluationDeadlineTask.stop();
+    evaluationDeadlineTask = null;
+  }
 };
 
 module.exports = {

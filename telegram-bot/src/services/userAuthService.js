@@ -17,7 +17,7 @@ const normalizePhone = (value) => {
   return digits;
 };
 
-const findUserByPhone = async (phone) => {
+const findUserByPhone = async (phone, expectedUserId = null) => {
   const normalizedPhone = normalizePhone(phone);
   if (!normalizedPhone) return null;
 
@@ -49,10 +49,45 @@ const findUserByPhone = async (phone) => {
     row.lab_assistant_phone_number,
     row.user_phone_number,
   ].some((storedPhone) => normalizePhone(storedPhone) === normalizedPhone));
-  if (matchingUsers.length > 1) return { ambiguous: true };
-  if (!matchingUsers[0]) return null;
+  const user = expectedUserId == null
+    ? matchingUsers.length === 1 ? matchingUsers[0] : null
+    : matchingUsers.find((row) => Number(row.id) === Number(expectedUserId));
+  if (matchingUsers.length > 1 && !user) return { ambiguous: true };
+  if (!user) return matchingUsers.length > 1 ? { ambiguous: true } : null;
 
-  const user = matchingUsers[0];
+  const role = normalizeRole(user.role);
+  return { ...user, role, allowed: ALLOWED_ROLES.has(role) };
+};
+
+const findUserForContactLink = async (identifier) => {
+  const normalized = String(identifier || '').trim().toLowerCase();
+  if (!normalized) return null;
+
+  const isEmail = normalized.includes('@');
+  const [rows] = await pool.query(`
+    SELECT u.id, u.email, u.role, u.status, u.telegram_chat_id, u.language,
+      s.student_id,
+      COALESCE(NULLIF(s.phone_number, ''), NULLIF(i.phone_number, ''), NULLIF(la.phone_number, ''), NULLIF(u.phone_number, '')) AS phone_number,
+      COALESCE(
+        NULLIF(TRIM(CONCAT(COALESCE(s.first_name, ''), ' ', COALESCE(s.last_name, ''))), ''),
+        NULLIF(TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))), ''),
+        NULLIF(TRIM(CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, ''))), ''),
+        u.email
+      ) AS name
+    FROM users u
+    LEFT JOIN students s ON s.user_id = u.id
+    LEFT JOIN instructors i ON i.user_id = u.id
+    LEFT JOIN lab_assistants la ON la.user_id = u.id
+    WHERE LOWER(COALESCE(u.status, 'active')) = 'active'
+      AND ${isEmail
+      ? "LOWER(TRIM(COALESCE(u.email, ''))) = ? AND LOWER(TRIM(COALESCE(u.role, ''))) IN ('instructor', 'lab_assistant', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_director', 'academic_directorate', 'academic_vice_president', 'directorate', 'system_admin', 'systemadmin')"
+    : "LOWER(TRIM(COALESCE(s.student_id, ''))) = ? AND LOWER(TRIM(COALESCE(u.role, ''))) = 'student'"}
+    LIMIT 2
+  `, [normalized]);
+
+  if (!rows.length) return null;
+  if (rows.length > 1) return { ambiguous: true };
+  const user = rows[0];
   const role = normalizeRole(user.role);
   return { ...user, role, allowed: ALLOWED_ROLES.has(role) };
 };
@@ -170,6 +205,74 @@ const linkTelegramChatIfAvailable = async (userId, chatId) => {
   return rows[0]?.telegram_chat_id != null && String(rows[0].telegram_chat_id) === String(chatId);
 };
 
+const linkTelegramContactIfAvailable = async (userId, role, chatId, phone) => {
+  const profileTarget = {
+    student: ['students', 'user_id'],
+    instructor: ['instructors', 'user_id'],
+    dept_head: ['instructors', 'user_id'],
+    college_dean: ['instructors', 'user_id'],
+    academic_director: ['instructors', 'user_id'],
+    academic_vice_president: ['instructors', 'user_id'],
+    lab_assistant: ['lab_assistants', 'user_id'],
+    system_admin: ['users', 'id'],
+  }[normalizeRole(role)];
+  const [profileTable, userIdColumn] = profileTarget || [];
+  const normalizedPhone = normalizePhone(phone);
+  if (!userId || !chatId || !profileTable || !userIdColumn || !normalizedPhone) return false;
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [[account]] = await connection.query(
+      'SELECT role, status, telegram_chat_id FROM users WHERE id = ? FOR UPDATE',
+      [userId]
+    );
+    if (!account || String(account.status || '').toLowerCase() !== 'active'
+      || normalizeRole(account.role) !== normalizeRole(role)
+      || (account.telegram_chat_id && String(account.telegram_chat_id) !== String(chatId))) {
+      await connection.rollback();
+      return false;
+    }
+
+    const [[chatOwner]] = await connection.query(
+      'SELECT id FROM users WHERE telegram_chat_id = ? AND id <> ? LIMIT 1',
+      [chatId, userId]
+    );
+    if (chatOwner) {
+      await connection.rollback();
+      return false;
+    }
+
+    const [profileResult] = await connection.query(
+      `UPDATE ${profileTable} SET phone_number = ? WHERE ${userIdColumn} = ?`,
+      [normalizedPhone, userId]
+    );
+    if (!profileResult.affectedRows) {
+      const [[profile]] = await connection.query(
+        `SELECT ${userIdColumn} FROM ${profileTable} WHERE ${userIdColumn} = ? LIMIT 1`,
+        [userId]
+      );
+      if (!profile) {
+        await connection.rollback();
+        return false;
+      }
+    }
+
+    await connection.query(
+      `UPDATE users SET phone_number = ?, telegram_chat_id = ?
+       WHERE id = ? AND status = 'active' AND (telegram_chat_id IS NULL OR telegram_chat_id = ?)`,
+      [normalizedPhone, chatId, userId, chatId]
+    );
+    await connection.commit();
+    return true;
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
 const clearTelegramChat = async (userId) => {
   if (!userId) return false;
   const [result] = await pool.query(
@@ -260,16 +363,27 @@ const getRoleEvaluationStatus = async (user) => {
   if (['instructor', 'lab_assistant', 'dept_head'].includes(role)) {
     const [rows] = await pool.query(`
       SELECT pe.id, pe.status, pe.evaluatee_id,
-        TRIM(CONCAT(COALESCE(target.first_name, ''), ' ', COALESCE(target.last_name, ''))) AS target_name,
+        COALESCE(
+          NULLIF(TRIM(CONCAT(COALESCE(target.first_name, ''), ' ', COALESCE(target.last_name, ''))), ''),
+          NULLIF(TRIM(CONCAT(COALESCE(target_lab.first_name, ''), ' ', COALESCE(target_lab.last_name, ''))), ''),
+          NULLIF(TRIM(CONCAT(COALESCE(ed.target_first_name, ''), ' ', COALESCE(ed.target_last_name, ''))), ''),
+          'Assigned staff'
+        ) AS target_name,
+        COALESCE(NULLIF(target_department.department_name, ''), target_department.name) AS target_department,
         CASE WHEN EXISTS (
           SELECT 1 FROM peer_evaluation_submissions pes
           WHERE pes.peer_evaluation_id = pe.id
             AND LOWER(COALESCE(pes.status, 'pending')) IN ('submitted', 'completed', 'approved')
         ) OR LOWER(COALESCE(pe.status, 'pending')) IN ('submitted', 'completed', 'approved') THEN 'Completed' ELSE 'Pending' END AS completion_status
-      FROM instructors evaluator
-      INNER JOIN peer_evaluations pe ON pe.evaluator_id = evaluator.id
-      INNER JOIN instructors target ON target.id = pe.evaluatee_id
-      WHERE evaluator.user_id = ?
+      FROM peer_evaluations pe
+      LEFT JOIN instructors evaluator ON evaluator.id = pe.evaluator_id
+      LEFT JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+      LEFT JOIN instructors target ON target.id = pe.evaluatee_id
+      LEFT JOIN lab_assistants target_lab
+        ON (target_lab.id = ed.target_user_id OR target_lab.user_id = ed.target_user_id)
+       AND LOWER(COALESCE(ed.target_type, '')) = 'lab_assistant'
+      LEFT JOIN departments target_department ON target_department.id = COALESCE(target.department_id, target_lab.department_id)
+      WHERE COALESCE(pe.evaluator_user_id, evaluator.user_id) = ?
       ORDER BY completion_status ASC, target_name ASC
     `, [userId]);
     const completed = rows.filter((row) => row.completion_status === 'Completed').length;
@@ -345,10 +459,12 @@ module.exports = {
   normalizeRole,
   normalizePhone,
   findUserByPhone,
+  findUserForContactLink,
   findUserByEmailOrId,
   findUserByTelegramChat,
   linkTelegramChat,
   linkTelegramChatIfAvailable,
+  linkTelegramContactIfAvailable,
   clearTelegramChat,
   setUserLanguage,
   getRoleEvaluationStatus,

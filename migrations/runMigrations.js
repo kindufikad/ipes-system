@@ -19,6 +19,7 @@ const expectedSchema = {
     role: "enum('admin','dept_head','instructor','student')",
     status: 'varchar(32)',
     email: 'varchar(255)',
+    profile_picture: 'varchar(255)',
     is_first_login: 'tinyint(1)',
     must_change_password: 'tinyint(1)',
     telegram_chat_id: 'bigint',
@@ -148,6 +149,19 @@ const expectedSchema = {
     expires_at: 'datetime',
     created_at: 'timestamp',
   },
+  system_admin_profiles: {
+    user_id: 'int(10) unsigned',
+    profile_picture: 'varchar(255)',
+    updated_at: 'timestamp',
+  },
+  admin_email_verifications: {
+    user_id: 'int(10) unsigned',
+    email: 'varchar(255)',
+    code_hash: 'varchar(255)',
+    expires_at: 'datetime',
+    attempts: 'tinyint(3) unsigned',
+    created_at: 'timestamp',
+  },
 };
 
 const getColumns = async (conn, table) => {
@@ -178,15 +192,24 @@ const createTable = async (conn, table) => {
   switch (table) {
     case 'users':
       await conn.query(`CREATE TABLE users (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         email VARCHAR(255) DEFAULT NULL UNIQUE,
         password_hash VARCHAR(255) NOT NULL,
+        profile_picture VARCHAR(255) NULL,
         role ENUM('admin','dept_head','instructor','student') NOT NULL DEFAULT 'student',
         status VARCHAR(32) NOT NULL DEFAULT 'active',
         is_first_login BOOLEAN NOT NULL DEFAULT TRUE,
         must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
         telegram_chat_id BIGINT DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+      break;
+    case 'system_admin_profiles':
+      await conn.query(`CREATE TABLE system_admin_profiles (
+        user_id INT UNSIGNED PRIMARY KEY,
+        profile_picture VARCHAR(255) NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_system_admin_profiles_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
       break;
     case 'departments':
@@ -362,6 +385,18 @@ const createTable = async (conn, table) => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT fk_password_resets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         INDEX idx_password_resets_user (user_id, expires_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+      break;
+    case 'admin_email_verifications':
+      await conn.query(`CREATE TABLE admin_email_verifications (
+        user_id INT UNSIGNED PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        code_hash VARCHAR(255) NOT NULL,
+        expires_at DATETIME NOT NULL,
+        attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_admin_email_verifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        INDEX idx_admin_email_verifications_expiry (expires_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
       break;
     default:

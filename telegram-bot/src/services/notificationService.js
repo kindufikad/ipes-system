@@ -29,7 +29,7 @@ const sendTelegramNotification = async (userId, message) => {
     parse_mode: 'HTML',
   };
   const dashboardUrl = getDashboardUrl(recipient.role);
-  if (dashboardUrl) {
+  if (dashboardUrl && dashboardUrl.startsWith('http://') && !dashboardUrl.includes('localhost') && !dashboardUrl.includes('127.0.0.1')) {
     options.reply_markup = {
       inline_keyboard: [[{
         text: String(recipient.language || '').toLowerCase() === 'en' ? 'Open IPES' : 'IPES ይክፈቱ',

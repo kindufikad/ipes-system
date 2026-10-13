@@ -33,6 +33,7 @@ const { sendDeptHeadEvaluationReminder } = require('./controllers/trackingContro
 const { authenticateToken: mwAuthenticateToken, authorizeRoles: mwAuthorizeRoles } = require('./middleware/auth');
 const { auditRequest } = require('./middleware/auditLogger');
 const securityGate = require('./middleware/securityGate');
+const { getDepartmentEvaluationDeadline, isEvaluationDeadlineExpired, EVALUATION_PERIOD_EXPIRED_MESSAGE } = require('./services/evaluationDeadlineService');
 const systemAccessLock = require('./middleware/systemAccessLock');
 const { responseTimeMiddleware } = require('./middleware/systemHealth');
 const { clearLocalDevelopmentBlockedIps } = require('./controllers/securityAdminController');
@@ -49,6 +50,8 @@ const { validateEvaluationFeedbackPair } = require('./utils/validationUtility');
 const { sanitizeEvaluationFeedback } = require('./utils/validationUtility');
 const { calculateLikertPercentage, getRatedLikertValues, isValidLikertResponse } = require('./utils/likertScoring');
 const { calculateAndSaveInstructorResult } = require('./utils/evaluationCalculator');
+const { getLabAssistantPerformance } = require('./controllers/labAssistantPerformanceController');
+const { buildStudentSemesterFilter } = require('./utils/semester');
 const { startTelegramBot } = require('./services/telegramBot');
 const { startCronService, getStudentReminderRecipients } = require('./services/cronService');
 const { sendTelegramReminder } = require('./utils/telegramBot');
@@ -130,6 +133,7 @@ app.use('/api/department', departmentRoutes);
 app.use('/api/lab-assistant', labAssistantRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/profile', userRoutes);
 app.use('/api/dean', deanRoutes);
 app.use('/api/directorate', directorateRoutes);
 app.use('/api/evaluations', evaluationRoutes);
@@ -203,7 +207,16 @@ app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAu
         evaluated_students_count: studentCount,
         evaluated_peers_count: peerCount,
         total_students_evaluated_count: studentCount,
+        student_completed: Number(metrics.student?.count || 0),
+        student_required: Number(metrics.student?.requiredCount || 0),
+        required_student_evaluators: Number(metrics.student?.requiredCount || 0),
         total_peers_evaluated_count: peerCount,
+        peer_completed: Number(metrics.peer?.count || 0),
+        peer_required: Number(metrics.peer?.requiredCount || 0),
+        required_peer_evaluators: Number(metrics.peer?.requiredCount || 0),
+        completion: metrics.completion,
+        isComplete: metrics.isComplete,
+        can_print: metrics.isComplete,
         hasCourseAssigned: Boolean(metrics.hasAssignedCourse),
         has_course_assigned: Boolean(metrics.hasAssignedCourse),
         total_score: metrics.totalScore,
@@ -226,36 +239,14 @@ app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAu
          WHERE la.id = ? LIMIT 1`,
         [instructorId]
       );
-      const [[student]] = await pool.query(
-        `SELECT COALESCE(AVG(ses.score), 0) AS score, COUNT(DISTINCT ses.id) AS count
-         FROM student_evaluation_submissions ses INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-         WHERE ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
-            AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')` ,
-          [instructorId, profile.user_id]
-      );
-      const [[peer]] = await pool.query(
-        `SELECT COALESCE(AVG(pes.score), 0) AS score, COUNT(DISTINCT pes.id) AS count
-         FROM peer_evaluation_submissions pes INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-         INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
-         WHERE ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
-            AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')` ,
-          [instructorId, profile.user_id]
-      );
-      const [[deptHead]] = await pool.query(
-        `SELECT COALESCE(AVG(dhe.total_score), 0) AS score, COUNT(DISTINCT dhe.id) AS count
-         FROM dept_head_evaluations dhe
-         WHERE dhe.evaluatee_id IN (?, ?) AND LOWER(COALESCE(dhe.target_role, '')) = 'lab_assistant'
-            AND LOWER(COALESCE(dhe.status, 'pending')) IN ('submitted', 'completed', 'approved')` ,
-          [instructorId, profile.user_id]
-      );
-      const studentRaw = Number(Number(student?.score || 0).toFixed(2));
-      const peerRaw = Number(Number(peer?.score || 0).toFixed(2));
-      const deptHeadStored = Number(deptHead?.score || 0);
-      const deptHeadRaw = Number(deptHeadStored.toFixed(2));
-      const studentWeighted = Number((studentRaw * 0.5).toFixed(2));
-      const deptHeadWeighted = Number((deptHeadRaw * 0.3).toFixed(2));
-      const peerWeighted = Number((peerRaw * 0.2).toFixed(2));
-      const totalScore = Number((studentWeighted + deptHeadWeighted + peerWeighted).toFixed(2));
+      const evaluated = await getLabAssistantPerformance({
+        staffId: profile.id,
+        userId: profile.user_id,
+        academicYear,
+        semester,
+      });
+      const { studentScore: studentRaw, peerScore: peerRaw, deptHeadScore: deptHeadRaw } = evaluated;
+      const { studentWeighted, deptHeadWeighted, peerWeighted, totalScore, isComplete } = evaluated;
       return res.json({
         success: true,
         instructor_id: profile.id,
@@ -269,22 +260,43 @@ app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAu
         student_raw_percentage: studentRaw,
         student_weighted: studentWeighted,
         dept_head_score: deptHeadRaw,
-        dept_head_raw_score: deptHeadStored,
+        dept_head_raw_score: evaluated.deptHeadStoredScore,
         dept_head_average: deptHeadRaw,
         dept_head_weighted: deptHeadWeighted,
         peer_average: peerRaw,
         peer_raw_percentage: peerRaw,
         peer_weighted: peerWeighted,
-        evaluated_students_count: Number(student?.count || 0),
-        evaluated_peers_count: Number(peer?.count || 0),
-        total_score: totalScore,
-        final_score: totalScore,
-        status: totalScore > 0 ? 'Completed' : 'Pending',
-        can_print: totalScore > 0,
+        has_assigned_courses: evaluated.hasAssignedCourses,
+        hasAssignedCourses: evaluated.hasAssignedCourses,
+        weights: evaluated.weights,
+        active_weight: evaluated.activeWeight,
+        breakdown: evaluated.breakdown,
+        is_complete: isComplete,
+        isComplete,
+        student_complete: evaluated.isStudentComplete,
+        peer_complete: evaluated.isPeerComplete,
+        dept_head_complete: evaluated.isDeptHeadComplete,
+        completion: {
+          isStudentComplete: evaluated.isStudentComplete,
+          isPeerComplete: evaluated.isPeerComplete,
+          isDeptHeadComplete: evaluated.isDeptHeadComplete,
+          studentCompletedCount: evaluated.studentSubmissionCount,
+          requiredStudentCount: evaluated.studentRequiredCount,
+          incomingPeerCount: evaluated.peerSubmissionCount,
+        },
+        evaluated_students_count: evaluated.studentSubmissionCount,
+        student_completed: evaluated.studentSubmissionCount,
+        student_required: evaluated.studentRequiredCount,
+        evaluated_peers_count: evaluated.peerSubmissionCount,
+        peer_completed: evaluated.peerSubmissionCount,
+        total_score: isComplete ? totalScore : null,
+        final_score: isComplete ? totalScore : null,
+        status: isComplete ? 'Completed' : 'Pending',
+        can_print: isComplete,
         breakdown: {
-          student: { rawPercentage: studentRaw, weightedContribution: studentWeighted, weight: 50 },
-          deptHead: { rawPercentage: deptHeadRaw, rawScore: deptHeadStored, weightedContribution: deptHeadWeighted, weight: 30 },
-          peer: { rawPercentage: peerRaw, weightedContribution: peerWeighted, weight: 20 },
+          student: evaluated.breakdown.student,
+          deptHead: { ...evaluated.breakdown.deptHead, storedScore: evaluated.deptHeadStoredScore },
+          peer: evaluated.breakdown.peer,
         },
       });
     }
@@ -806,6 +818,13 @@ const initializeSchema = async () => {
   if (!(await columnExists('users', 'profile_picture'))) {
     await pool.query('ALTER TABLE users ADD COLUMN profile_picture VARCHAR(255) NULL');
   }
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS system_admin_profiles (
+    user_id INT UNSIGNED PRIMARY KEY,
+    profile_picture VARCHAR(255) NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_system_admin_profiles_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
   if (!(await columnExists('users', 'language'))) {
     await pool.query("ALTER TABLE users ADD COLUMN language ENUM('en', 'am') NOT NULL DEFAULT 'am'");
@@ -1741,6 +1760,11 @@ app.delete('/api/notifications/:notificationId', mwAuthenticateToken, deleteNoti
 app.put('/api/notifications/mark-all-read/:userId', mwAuthenticateToken, markAllRead);
 app.delete('/api/notifications/clear-all/:userId', mwAuthenticateToken, clearAllNotifications);
 app.post('/api/notifications/send-telegram-reminders', mwAuthenticateToken, mwAuthorizeRoles('dept_head'), sendTelegramReminders);
+app.post('/api/notifications/send-reminder', mwAuthenticateToken, mwAuthorizeRoles('dept_head'), sendDeptHeadEvaluationReminder);
+app.post('/api/notifications/send-bulk-reminders', mwAuthenticateToken, mwAuthorizeRoles('dept_head'), (req, res) => {
+  req.body = { ...(req.body || {}), bulk_summary: true };
+  return sendDeptHeadEvaluationReminder(req, res);
+});
 app.post('/api/notifications/send-reminders', mwAuthenticateToken, mwAuthorizeRoles('dept_head'), (req, res) => {
   req.body = { ...(req.body || {}), send_to_all_pending: true };
   return sendDeptHeadEvaluationReminder(req, res);
@@ -1763,37 +1787,45 @@ app.get(['/api/dept-head/tracking/peers', '/api/tracking/peers'], authenticate, 
     const query = targetRole === 'lab_assistant'
       ? `SELECT
           pe.id AS peer_id,
-          pe.evaluator_id,
+          COALESCE(evaluator.id, la.id) AS evaluator_id,
+          u.id AS evaluator_user_id,
           la.employee_id AS staff_id,
           TRIM(CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, ''))) AS peer_instructor,
-          CASE WHEN MAX(pes.id) IS NOT NULL THEN 'Submitted' ELSE 'Pending' END AS status
+          CASE WHEN EXISTS (
+            SELECT 1 FROM peer_evaluation_submissions completed_pes
+            WHERE completed_pes.peer_evaluation_id = pe.id
+              AND LOWER(COALESCE(completed_pes.status, 'pending')) IN ('submitted', 'completed', 'approved')
+          ) OR LOWER(COALESCE(pe.status, 'pending')) IN ('submitted', 'completed', 'approved') THEN 'Submitted' ELSE 'Pending' END AS status
         FROM peer_evaluations pe
+        LEFT JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
         JOIN lab_assistants target ON pe.evaluatee_id = target.id
-        JOIN instructors evaluator ON evaluator.id = pe.evaluator_id
-        JOIN users u ON evaluator.user_id = u.id
+          OR (LOWER(COALESCE(ed.target_type, '')) = 'lab_assistant' AND (target.id = ed.target_user_id OR target.user_id = ed.target_user_id))
+        LEFT JOIN instructors evaluator ON evaluator.id = pe.evaluator_id
+        JOIN users u ON u.id = COALESCE(pe.evaluator_user_id, evaluator.user_id)
         JOIN lab_assistants la ON la.user_id = u.id
-        LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
         WHERE target.department_id = ?
           AND (target.id = ? OR target.user_id = ?)
-          AND u.role = 'lab_assistant'
-        GROUP BY pe.id, pe.evaluator_id, la.first_name, la.last_name, la.employee_id
+          AND LOWER(TRIM(COALESCE(u.role, ''))) = 'lab_assistant'
         ORDER BY status DESC, peer_instructor ASC`
       : `SELECT
           pe.id AS peer_id,
           pe.evaluator_id,
+          u.id AS evaluator_user_id,
           i.employee_id AS staff_id,
           TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, u.email))) AS peer_instructor,
-          CASE WHEN MAX(pes.id) IS NOT NULL THEN 'Submitted' ELSE 'Pending' END AS status
+          CASE WHEN EXISTS (
+            SELECT 1 FROM peer_evaluation_submissions completed_pes
+            WHERE completed_pes.peer_evaluation_id = pe.id
+              AND LOWER(COALESCE(completed_pes.status, 'pending')) IN ('submitted', 'completed', 'approved')
+          ) OR LOWER(COALESCE(pe.status, 'pending')) IN ('submitted', 'completed', 'approved') THEN 'Submitted' ELSE 'Pending' END AS status
         FROM peer_evaluations pe
         JOIN instructors target ON pe.evaluatee_id = target.id
         JOIN instructors evaluator ON evaluator.id = pe.evaluator_id
         JOIN users u ON evaluator.user_id = u.id
         JOIN instructors i ON i.id = evaluator.id
-        LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
         WHERE target.department_id = ?
           AND (target.id = ? OR target.user_id = ?)
           AND u.role = 'instructor'
-        GROUP BY pe.id, pe.evaluator_id, i.first_name, i.last_name, i.employee_id, u.email
         ORDER BY status DESC, peer_instructor ASC`;
     const params = [departmentId, targetEvaluateeId, targetEvaluateeId];
 
@@ -1812,6 +1844,7 @@ app.get(['/api/dept-head/tracking/peers', '/api/tracking/peers'], authenticate, 
     const normalized = rows.map((row) => ({
       peer_id: row.peer_id,
       evaluator_id: row.evaluator_id,
+      evaluator_user_id: row.evaluator_user_id,
       staff_id: row.staff_id || '',
       peer_instructor: (row.peer_instructor || '').trim() || 'Unknown Peer',
       status: String(row.status || 'Pending'),
@@ -2329,9 +2362,15 @@ const getDeptHeadPerformance = async (req, res) => {
       isStudentEvaluationRequired: hasAssignedCourse,
       isStudentEvaluationExcluded: !hasAssignedCourse,
       raw_student_score: Number(weightedSummary.breakdown.student.rawPercentage.toFixed(2)),
-      submission_count: studentRows.length,
+      submission_count: performance.studentCount,
+      student_completed: performance.studentCount,
+      student_required: performance.requiredStudentCount,
+      required_student_evaluators: performance.requiredStudentCount,
       total_assignments: performance.totalAssignments,
       incomingPeerCount,
+      peer_completed: incomingPeerCount,
+      dept_head_completed: deanRows.length,
+      dept_head_required: 1,
       periodEnded,
       hasAssignedCourse: Boolean(weightedSummary.hasAssignedCourse),
       hasAssignedCourses: Boolean(weightedSummary.hasAssignedCourse),
@@ -2340,7 +2379,7 @@ const getDeptHeadPerformance = async (req, res) => {
       warning: weightedSummary.warning,
       breakdown: {
         ...weightedSummary.breakdown,
-        student: { ...weightedSummary.breakdown.student, submissionCount: studentRows.length },
+        student: { ...weightedSummary.breakdown.student, submissionCount: performance.studentCount },
       },
       strengths,
       weaknesses: improvements,
@@ -2365,6 +2404,7 @@ app.get('/api/dept-head/students', authenticate, authorizeRoles('dept_head'), as
     const yearLevel = String(req.query.year_level || '').trim();
     const programType = String(req.query.program_type || '').trim();
     const section = normalizeSectionValue(req.query.section);
+    const semesterFilter = buildStudentSemesterFilter(req.query.semester);
     const filters = ['u.role = \'student\'', 's.department_id = ?'];
     const params = [departmentId];
 
@@ -2380,6 +2420,10 @@ app.get('/api/dept-head/students', authenticate, authorizeRoles('dept_head'), as
       filters.push("LOWER(TRIM(REPLACE(REPLACE(s.section, 'Section ', ''), 'section ', ''))) = LOWER(?)");
       params.push(section);
     }
+    if (semesterFilter) {
+      filters.push(semesterFilter.sql);
+      params.push(...semesterFilter.params);
+    }
 
     const [rows] = await pool.query(
       `SELECT
@@ -2388,6 +2432,7 @@ app.get('/api/dept-head/students', authenticate, authorizeRoles('dept_head'), as
         s.program_type,
         s.year_level,
         s.section,
+        s.semester,
         d.name AS department,
         s.department_id
       FROM users u
@@ -3649,7 +3694,7 @@ const getDepartmentInstructors = async (req, res) => {
         LEFT JOIN colleges c ON c.id = d.college_id
         WHERE i.department_id = ?
           AND LOWER(COALESCE(u.status, 'active')) = 'active'
-          AND LOWER(COALESCE(u.role, 'instructor')) IN ('instructor', 'lab_assistant', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_director', 'director')
+          AND LOWER(COALESCE(u.role, 'instructor')) IN ('instructor', 'lab_assistant', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_director', 'academic_directorate', 'director', 'directorate')
 
         UNION ALL
 
@@ -4410,10 +4455,11 @@ app.post(['/api/evaluations/publish', '/api/evaluations/publish-student'], authe
   try {
     const { department_id, program_type, semester, section } = req.body;
     const requestedBatch = String(req.body.batchYear || '').trim();
-    if (requestedBatch && !['3rd Year', '4th Year', 'All Batches'].includes(requestedBatch)) {
-      return res.status(400).json({ success: false, message: 'batchYear must be 3rd Year, 4th Year, or All Batches.' });
+    const isYearLevelBatch = /^[1-7](?:st|nd|rd|th) Year(?: \(Freshman\))?$/i.test(requestedBatch);
+    if (requestedBatch && !isYearLevelBatch && requestedBatch !== 'All Batches') {
+      return res.status(400).json({ success: false, message: 'batchYear must be a year level from Year 1 through Year 7, or All Batches.' });
     }
-    const batchYear = ['3rd Year', '4th Year', 'All Batches'].includes(requestedBatch) ? requestedBatch : '';
+    const batchYear = isYearLevelBatch || requestedBatch === 'All Batches' ? requestedBatch : '';
     const year_level = batchYear && batchYear !== 'All Batches'
       ? batchYear
       : batchYear === 'All Batches'
@@ -5716,6 +5762,8 @@ app.get('/api/student/profile', authenticate, authorizeRoles('student'), async (
     const [rows] = await pool.query(
       `SELECT u.id AS user_id,
         COALESCE(u.email, s.student_id, '') AS username,
+        (u.telegram_chat_id IS NOT NULL) AS telegram_linked,
+        COALESCE(NULLIF(s.phone_number, ''), NULLIF(u.phone_number, '')) AS phone_number,
         s.id AS student_row_id,
         s.student_id,
         s.first_name,
@@ -5740,6 +5788,8 @@ app.get('/api/student/profile', authenticate, authorizeRoles('student'), async (
         user_id: req.user.id,
         student_id: null,
         username: req.user.username,
+        telegram_linked: false,
+        phone_number: null,
         full_name: req.user.username,
         department_id: null,
         department_name: null,
@@ -5871,30 +5921,25 @@ app.get('/api/lab-assistant/performance-summary', authenticate, authorizeRoles('
   try {
     const [[assistant]] = await pool.query('SELECT id, user_id, employee_id, first_name, last_name, department_id FROM lab_assistants WHERE user_id = ? LIMIT 1', [req.user.id]);
     if (!assistant) return sendResponse(res, 404, 'Lab Assistant profile not found.', 'የላብ ረዳት መገለጫ አልተገኘም።');
-    const [[student]] = await pool.query(
-      `SELECT COALESCE(AVG(ses.score), 0) AS score
-       FROM student_evaluation_submissions ses
-       INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-       WHERE ed.department_id = ? AND ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
-         AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')`,
-      [assistant.department_id, assistant.id, assistant.user_id]
-    );
-    const [[peer]] = await pool.query(
-      `SELECT COALESCE(AVG(pes.score), 0) AS score
-       FROM peer_evaluation_submissions pes
-       INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-       INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
-       WHERE ed.department_id = ? AND ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
-         AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')`,
-      [assistant.department_id, assistant.id, assistant.user_id]
-    );
-    const studentScore = Number(student?.score || 0);
-    const peerScore = Number(peer?.score || 0);
+    const performance = await getLabAssistantPerformance({
+      staffId: assistant.id,
+      userId: assistant.user_id,
+      academicYear: req.query.academic_year,
+      semester: req.query.semester,
+    });
     return sendResponse(res, 200, 'Lab Assistant performance retrieved.', 'የላብ ረዳት አፈጻጸም ተገኝቷል።', {
-      studentScore: Number(studentScore.toFixed(2)),
-      peerScore: Number(peerScore.toFixed(2)),
-      overallScore: Number((studentScore * 0.5 + peerScore * 0.5).toFixed(2)),
-      weights: { student: 50, peer: 50 },
+      studentScore: performance.studentScore,
+      peerScore: performance.peerScore,
+      deptHeadScore: performance.deptHeadScore,
+      overallScore: performance.totalScore,
+      totalScore: performance.totalScore,
+      totalWeightedScore: performance.totalScore,
+      isComplete: performance.isComplete,
+      hasAssignedCourses: performance.hasAssignedCourses,
+      weights: performance.weights,
+      breakdown: performance.breakdown,
+      academicYear: performance.academicYear,
+      semester: performance.semester,
     });
   } catch (error) {
     console.error('Lab Assistant performance error:', error);
@@ -5910,14 +5955,10 @@ const getInstructorPerformance = async (req, res) => {
     }
 
     const instructor = instructorRows[0];
-    const [[activeEvaluationPeriod]] = await pool.query(
-      `SELECT academic_year, semester FROM evaluation_periods
-       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
-    );
     const unified = await getInstructorOverallPerformance({
       instructorId: instructor.id,
-      academicYear: String(req.query.academic_year || activeEvaluationPeriod?.academic_year || '').trim(),
-      semester: String(req.query.semester || activeEvaluationPeriod?.semester || '').trim(),
+      academicYear: String(req.query.academic_year || '').trim(),
+      semester: String(req.query.semester || '').trim(),
     });
     return sendResponse(res, 200, 'Performance summary retrieved.', 'የአፈጻጸም ማጠቃለያ ተመለሰ።', {
       totalWeightedScore: unified.totalScore,
@@ -6555,6 +6596,10 @@ app.post('/api/evaluations/submit-peer', authenticate, authorizeRoles('instructo
     const evaluatorInstructorId = Number(evaluatorProfile?.id || 0);
     const academicYear = String(req.body.academic_year || new Date().getFullYear());
     const semester = String(req.body.semester || 'Semester I');
+    const activeDeadline = await getDepartmentEvaluationDeadline(connection, evaluatorProfile?.department_id, { ensureTable: false });
+    if (activeDeadline.autoLock && isEvaluationDeadlineExpired(activeDeadline.deadlineAt)) {
+      return sendResponse(res, 400, EVALUATION_PERIOD_EXPIRED_MESSAGE, EVALUATION_PERIOD_EXPIRED_MESSAGE);
+    }
     if (!evaluatorInstructorId || !evaluatorProfile?.department_id || !await isPeerPublicationActive(evaluatorProfile.department_id, academicYear, semester)) {
       return sendResponse(res, 403, 'Peer evaluation is not currently published.', 'የባልደረባ ግምገማ አሁን አልታተመም።');
     }

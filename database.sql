@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE KEY uq_users_single_active_system_admin (active_system_admin_slot)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+  CREATE TABLE IF NOT EXISTS system_admin_profiles (
+    user_id INT UNSIGNED PRIMARY KEY,
+    profile_picture VARCHAR(255) NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_system_admin_profiles_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- --------------------------------------------------------
 -- 3. Instructors & Department Heads Table
 -- --------------------------------------------------------

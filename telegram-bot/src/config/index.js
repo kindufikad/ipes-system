@@ -55,7 +55,21 @@ const DASHBOARD_PATHS = {
 
 const getDashboardUrl = (role) => {
   const path = DASHBOARD_PATHS[String(role || '').trim().toLowerCase()];
-  return path && IPES_WEB_URL ? `${IPES_WEB_URL}${path}` : null;
+  if (!path || !IPES_WEB_URL) return null;
+
+  try {
+    const url = new URL(`${IPES_WEB_URL}${path}`);
+    const hostname = url.hostname.toLowerCase();
+    const isLoopback = hostname === 'localhost'
+      || hostname.endsWith('.localhost')
+      || hostname === '::1'
+      || hostname === '0.0.0.0'
+      || /^127\./.test(hostname);
+    if (!['http:', 'https:'].includes(url.protocol) || isLoopback) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 };
 
 module.exports = {

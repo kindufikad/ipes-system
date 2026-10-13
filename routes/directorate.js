@@ -5,6 +5,7 @@ const { calculateLikertPercentage, getRatedLikertValues, isValidLikertResponse }
 const { calculateAndSaveInstructorResult } = require('../utils/evaluationCalculator');
 const { calculateDeanPerformanceScore } = require('../utils/deanPerformanceScore');
 const { getDirectoratePerformance } = require('../controllers/directoratePerformanceController');
+const { getDepartmentEvaluationDeadline, isEvaluationDeadlineExpired, EVALUATION_PERIOD_EXPIRED_MESSAGE } = require('../services/evaluationDeadlineService');
 
 const router = express.Router();
 router.use(authenticateToken, authorizeRoles('academic_directorate', 'academic_director', 'directorate'));
@@ -88,8 +89,8 @@ const isPeerPublicationActive = async (departmentId, academicYear, semester) => 
 
 const ensureDepartmentPeerAssignments = async (departmentId) => {
   await pool.query(
-    `INSERT IGNORE INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, status)
-     SELECT evaluator.id, evaluatee.id, NULL, 'pending'
+    `INSERT IGNORE INTO peer_evaluations (evaluator_id, evaluator_user_id, evaluatee_id, course_id, status)
+     SELECT evaluator.id, evaluator_user.id, evaluatee.id, NULL, 'pending'
      FROM instructors evaluator
      INNER JOIN users evaluator_user ON evaluator_user.id = evaluator.user_id
      INNER JOIN instructors evaluatee ON evaluatee.department_id = evaluator.department_id
@@ -157,32 +158,31 @@ router.get('/deans', async (req, res) => {
       `SELECT u.id AS deanId,
         COALESCE(NULLIF(CONCAT_WS(' ', dean_instructor.first_name, dean_instructor.last_name), ''), u.email) AS full_name,
         u.email,
+        dean_instructor.department_id,
         c.id AS collegeId,
         COALESCE(NULLIF(c.name, ''), 'Unassigned') AS college_name,
-        COALESCE(
-          DATE_FORMAT(active_period.deadline, '%Y-%m-%d'),
-          DATE_FORMAT(DATE_ADD(CURRENT_DATE, INTERVAL 30 DAY), '%Y-%m-%d')
-        ) AS deadline,
         COALESCE(de.status, 'PENDING') AS evaluation_status,
         COALESCE(de.total_score, 0) AS score
        FROM users u
       INNER JOIN instructors dean_instructor ON dean_instructor.user_id = u.id
       INNER JOIN departments d ON d.id = dean_instructor.department_id
       INNER JOIN colleges c ON c.id = d.college_id
-       LEFT JOIN (
-         SELECT deadline
-         FROM evaluation_periods
-         WHERE LOWER(status) = 'active'
-         ORDER BY id DESC
-         LIMIT 1
-       ) AS active_period ON 1 = 1
        LEFT JOIN directorate_evaluations de ON de.dean_id = u.id AND de.evaluator_id = ?
        WHERE LOWER(COALESCE(u.role, '')) = 'college_dean'
          AND LOWER(COALESCE(u.status, 'active')) = 'active'
        ORDER BY college_name ASC, full_name ASC`,
       [req.user.id]
     );
-    return res.json(rows.map((row) => ({ ...row, score: Number(row.score || 0) })));
+    const deans = await Promise.all(rows.map(async (row) => {
+      const deadline = await getDepartmentEvaluationDeadline(pool, row.department_id);
+      return {
+        ...row,
+        deadline: deadline.deadlineAt,
+        deadline_auto_lock: deadline.autoLock,
+        score: Number(row.score || 0),
+      };
+    }));
+    return res.json(deans);
   } catch (error) {
     return sendServerError(res, error, 'deans query error');
   }
@@ -383,8 +383,17 @@ router.post('/evaluate-dean', async (req, res) => {
   }
 
   try {
-    const [[dean]] = await pool.query("SELECT id FROM users WHERE id = ? AND LOWER(role) = 'college_dean' LIMIT 1", [deanId]);
+    const [[dean]] = await pool.query(
+      `SELECT u.id, i.department_id
+       FROM users u LEFT JOIN instructors i ON i.user_id = u.id
+       WHERE u.id = ? AND LOWER(u.role) = 'college_dean' LIMIT 1`,
+      [deanId]
+    );
     if (!dean) return res.status(404).json({ message: 'College Dean not found.' });
+    const deadline = await getDepartmentEvaluationDeadline(pool, dean.department_id);
+    if (deadline.autoLock && isEvaluationDeadlineExpired(deadline.deadlineAt)) {
+      return res.status(400).json({ message: EVALUATION_PERIOD_EXPIRED_MESSAGE });
+    }
     const totalScore = (values.reduce((sum, value) => sum + value, 0) / (values.length * 5)) * 100;
     await pool.query(
       `INSERT INTO directorate_evaluations (evaluator_id, dean_id, ratings, strengths, weaknesses, total_score, status)
@@ -407,6 +416,7 @@ router.get('/peer-evaluations', async (req, res) => {
     if (!directorProfile?.department_id || !await isPeerPublicationActive(directorProfile.department_id, academicYear, semester)) {
       return res.json({ published: false, data: [] });
     }
+    const activeDeadline = await getDepartmentEvaluationDeadline(pool, directorProfile.department_id);
     await ensureDepartmentPeerAssignments(directorProfile.department_id);
     const [rows] = await pool.query(
       `SELECT
@@ -416,10 +426,6 @@ router.get('/peer-evaluations', async (req, res) => {
         c.name AS college_name,
         COALESCE(NULLIF(d.department_name, ''), d.name) AS department,
         pe.id AS peer_evaluation_id,
-        COALESCE(
-          (SELECT deadline FROM evaluation_periods WHERE status = 'active' ORDER BY id DESC LIMIT 1),
-          pe.deadline
-        ) AS deadline,
         COALESCE(pes.status, pe.status, 'pending') AS submission_status,
         COALESCE(ROUND(pes.score, 2), 0) AS total_score,
         pes.strengths,
@@ -443,6 +449,8 @@ router.get('/peer-evaluations', async (req, res) => {
       const isEvaluated = ['submitted', 'completed', 'approved'].includes(String(row.submission_status || '').toLowerCase());
       return {
         ...row,
+        deadline: activeDeadline.deadlineAt,
+        deadline_auto_lock: activeDeadline.autoLock,
         submission_status: isEvaluated ? 'submitted' : 'pending',
         total_score: Number(row.total_score || 0),
         score: Number(row.total_score || 0),
@@ -787,6 +795,10 @@ router.post(['/peer-evaluations', '/submit-peer-evaluation'], async (req, res) =
     );
     const departmentId = Number(directorProfile?.department_id || 0);
     if (!departmentId) return res.status(403).json({ message: 'Your department is not defined.' });
+    const activeDeadline = await getDepartmentEvaluationDeadline(pool, departmentId);
+    if (activeDeadline.autoLock && isEvaluationDeadlineExpired(activeDeadline.deadlineAt)) {
+      return res.status(400).json({ message: EVALUATION_PERIOD_EXPIRED_MESSAGE });
+    }
 
     const [[instructor]] = await pool.query(
       `SELECT i.id, i.user_id, i.department_id
@@ -819,17 +831,10 @@ router.post(['/peer-evaluations', '/submit-peer-evaluation'], async (req, res) =
 
     let peerEvaluationId = peerEval?.id;
     if (!peerEvaluationId) {
-      const [[peerDispatch]] = await pool.query(
-        `SELECT deadline FROM evaluation_dispatches
-         WHERE department_id = ? AND evaluation_type = 'peer'
-           AND academic_year = ? AND semester = ?
-         ORDER BY id DESC LIMIT 1`,
-        [departmentId, academicYear, semester]
-      );
       const [assignmentResult] = await pool.query(
-        `INSERT IGNORE INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, deadline, status)
-         VALUES (?, ?, NULL, ?, 'pending')`,
-        [directorProfile.id, instructor.id, peerDispatch?.deadline || null]
+        `INSERT IGNORE INTO peer_evaluations (evaluator_id, evaluator_user_id, evaluatee_id, course_id, deadline, status)
+         VALUES (?, ?, ?, NULL, ?, 'pending')`,
+        [directorProfile.id, req.user.id, instructor.id, activeDeadline.deadlineAt]
       );
       peerEvaluationId = assignmentResult.insertId;
     }

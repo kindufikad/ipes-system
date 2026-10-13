@@ -106,7 +106,8 @@ const resetPassword = async (req, res) => {
 const login = async (req, res) => {
   try {
     const identifier = String(req.body?.identifier ?? req.body?.email ?? req.body?.username ?? '').trim();
-    const password = String(req.body?.password ?? '').trim();
+    const normalizedIdentifier = identifier.toLowerCase();
+    const password = String(req.body?.password ?? '');
 
     if (!identifier || !password) {
       return res.status(400).json({
@@ -141,10 +142,10 @@ const login = async (req, res) => {
           LEFT JOIN lab_assistants la ON la.user_id = u.id
          LEFT JOIN students s ON s.user_id = u.id
           LEFT JOIN departments d ON d.id = COALESCE(i.department_id, la.department_id, s.department_id)
-        WHERE (u.email = ? OR s.student_id = ? OR i.employee_id = ? OR la.employee_id = ?)
-           AND u.status = 'active'
+          WHERE (LOWER(TRIM(u.email)) = ? OR LOWER(TRIM(s.student_id)) = ? OR LOWER(TRIM(i.employee_id)) = ? OR LOWER(TRIM(la.employee_id)) = ?)
+            AND LOWER(TRIM(COALESCE(u.status, ''))) = 'active'
          LIMIT 1`,
-        [identifier, identifier, identifier, identifier]
+          [normalizedIdentifier, normalizedIdentifier, normalizedIdentifier, normalizedIdentifier]
       );
     } catch (err) {
       console.error('EXACT LOGIN SQL ERROR:', err.message, err.sql);
@@ -294,6 +295,7 @@ const me = async (req, res) => {
         u.email,
         u.role,
         u.status,
+        (u.telegram_chat_id IS NOT NULL) AS telegram_linked,
         u.is_first_login,
         u.must_change_password,
         u.created_at,
@@ -301,12 +303,13 @@ const me = async (req, res) => {
         COALESCE(NULLIF(u.last_name, ''), i.last_name, la.last_name, s.last_name, '') AS last_name,
         COALESCE(i.gender, la.gender, s.gender) AS gender,
         COALESCE(i.phone_number, la.phone_number, s.phone_number) AS phone_number,
-        COALESCE(i.profile_picture, la.profile_picture, s.profile_picture) AS profile_picture,
+        COALESCE(sap.profile_picture, u.profile_picture, i.profile_picture, la.profile_picture, s.profile_picture) AS profile_picture,
         COALESCE(i.department_id, la.department_id, s.department_id) AS department_id,
         d.name AS department_name,
         c.name AS college_name,
         s.student_id AS student_id
       FROM users u
+      LEFT JOIN system_admin_profiles sap ON sap.user_id = u.id
       LEFT JOIN instructors i ON u.id = i.user_id
       LEFT JOIN lab_assistants la ON u.id = la.user_id
       LEFT JOIN students s ON u.id = s.user_id
@@ -332,6 +335,7 @@ const me = async (req, res) => {
         email: user.email,
         role: user.role,
         status: user.status,
+        telegram_linked: Boolean(user.telegram_linked),
         isFirstLogin: Boolean(user.is_first_login || user.must_change_password),
         mustChangePassword: Boolean(user.must_change_password),
         gender: user.gender,
@@ -604,6 +608,8 @@ const registerLabAssistant = async (req, res) => {
 };
 
 const changePassword = async (req, res) => {
+  let connection;
+  let transactionStarted = false;
   try {
     const userId = Number(req.user?.id);
     const currentPassword = typeof req.body?.currentPassword === 'string'
@@ -653,7 +659,36 @@ const changePassword = async (req, res) => {
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    await pool.query('UPDATE users SET password_hash = ?, is_first_login = 0, must_change_password = 0 WHERE id = ?', [passwordHash, userId]);
+    const isSystemAdmin = ['admin', 'systemadmin', 'system_admin'].includes(String(user.role || '').trim().toLowerCase());
+    if (isSystemAdmin) {
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await connection.query('UPDATE users SET password_hash = ?, is_first_login = 0, must_change_password = 0 WHERE id = ?', [passwordHash, userId]);
+      await connection.query(
+        `INSERT INTO audit_logs
+          (action_title, description, performed_by, ip_address, actor_user_id, actor_email, actor_role, category, target_details, route_path, http_method, status_code)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'System Admin Password Updated',
+          'System Admin password updated',
+          user.email || String(userId),
+          req.ip || null,
+          userId,
+          user.email || null,
+          user.role,
+          'security',
+          JSON.stringify({ user_id: userId }),
+          req.originalUrl || '/api/admin/change-password',
+          req.method || 'PUT',
+          200,
+        ]
+      );
+      await connection.commit();
+      transactionStarted = false;
+    } else {
+      await pool.query('UPDATE users SET password_hash = ?, is_first_login = 0, must_change_password = 0 WHERE id = ?', [passwordHash, userId]);
+    }
 
     const identifier = user.email || user.student_id || `user-${user.id}`;
     const role = req.user.role || user.role;
@@ -687,8 +722,11 @@ const changePassword = async (req, res) => {
       },
     });
   } catch (error) {
+    if (transactionStarted) await connection.rollback().catch(() => {});
     console.error('Change password failed:', error);
     return res.status(500).json({ success: false, message: 'Unable to change password.' });
+  } finally {
+    connection?.release();
   }
 };
 

@@ -3,7 +3,8 @@ const pool = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { calculateLikertPercentage } = require('../utils/likertScoring');
 const { sanitizeEvaluationFeedback } = require('../utils/validationUtility');
-const { computeEvaluation } = require('../utils/calculateEvaluationScores');
+const { getLabAssistantPerformance } = require('../controllers/labAssistantPerformanceController');
+const { getDepartmentEvaluationDeadline, isEvaluationDeadlineExpired, EVALUATION_PERIOD_EXPIRED_MESSAGE } = require('../services/evaluationDeadlineService');
 
 const router = express.Router();
 
@@ -45,7 +46,7 @@ const getPeerStaff = async ({ departmentId, excludeUserId }) => {
         SELECT staff.target_record_id, staff.user_id, staff.first_name, staff.last_name, staff.employee_id, staff.target_role,
           staff.department_id, staff.department_name, staff.college_name,
            CASE WHEN pes.id IS NULL THEN 'pending' ELSE 'completed' END AS evaluation_status,
-           pes.id AS submission_id, pes.score AS total_score, pes.strengths, pes.suggestions,
+           pes.id AS submission_id, ROUND(pes.score, 2) AS score_percentage, pes.score AS total_score, pes.strengths, pes.suggestions,
            pes.responses, pes.status AS submission_status
     FROM (
       SELECT la.id AS target_record_id, la.user_id, la.first_name, la.last_name, la.employee_id,
@@ -121,59 +122,25 @@ router.get('/my-performance', authenticateToken, authorizeRoles('lab_assistant',
       });
     }
 
-    const academicYear = String(req.query.academic_year || '').trim();
-    const semester = String(req.query.semester || '').trim();
-
-    const [studentRows] = await pool.query(`
-      SELECT ses.score, ses.strengths, ses.improvements, ses.feedback
-      FROM evaluation_dispatches ed
-      LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
-      WHERE ed.target_type = 'lab_assistant'
-        AND ed.target_user_id IN (?, ?)
-        AND ed.evaluation_type IN ('student', 'lab_assistant_student')
-        AND (? = '' OR ed.academic_year = ?)
-        AND (? = '' OR ed.semester = ?)
-        AND ses.id IS NOT NULL
-      `, [staff.id, userId, academicYear, academicYear, semester, semester]);
-
-    const [peerRows] = await pool.query(`
-      SELECT pes.score, pes.strengths, pes.suggestions
-      FROM evaluation_dispatches ed
-      LEFT JOIN peer_evaluations pe ON pe.dispatch_id = ed.id
-      LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
-      WHERE ed.target_type = 'lab_assistant'
-        AND ed.target_user_id IN (?, ?)
-        AND ed.evaluation_type IN ('peer', 'lab_assistant_peer')
-        AND (? = '' OR ed.academic_year = ?)
-        AND (? = '' OR ed.semester = ?)
-        AND pes.id IS NOT NULL
-      `, [staff.id, userId, academicYear, academicYear, semester, semester]);
-
-    const [deptHeadRows] = await pool.query(`
-      SELECT dhe.total_score AS score, dhe.strengths, dhe.weaknesses AS improvements, dhe.feedback
-      FROM dept_head_evaluations dhe
-      WHERE dhe.target_role = 'lab_assistant'
-        AND (dhe.evaluatee_id IN (?, ?) OR dhe.instructor_id IN (?, ?))
-        AND LOWER(COALESCE(dhe.status, 'pending')) IN ('submitted', 'completed', 'approved')
-    `, [staff.id, userId, staff.id, userId]);
-
-    const studentScore = studentRows.length
-      ? Number((studentRows.reduce((sum, row) => sum + normalizeNumber(row.score), 0) / studentRows.length).toFixed(2))
-      : 0;
-    const peerScore = peerRows.length
-      ? Number((peerRows.reduce((sum, row) => sum + normalizeNumber(row.score), 0) / peerRows.length).toFixed(2))
-      : 0;
-    const deptHeadScore = deptHeadRows.length
-      ? Number((deptHeadRows.reduce((sum, row) => sum + normalizeNumber(row.score), 0) / deptHeadRows.length).toFixed(2))
-      : 0;
+    const isLabAssistantProfile = Boolean(staffRows.length && staffRows[0].id);
+    const evaluation = await getLabAssistantPerformance({
+      staffId: staff.id,
+      userId,
+      academicYear: req.query.academic_year,
+      semester: req.query.semester,
+      hasAssignedCoursesOverride: isLabAssistantProfile ? undefined : true,
+    });
+    const { studentRows, peerRows, deptHeadRows, studentScore, peerScore, deptHeadScore } = evaluation;
     const completion = {
-      isStudentComplete: studentRows.length > 0,
-      isDeptHeadComplete: deptHeadRows.length > 0,
-      isPeerComplete: peerRows.length > 0,
+      isStudentComplete: evaluation.isStudentComplete,
+      isDeptHeadComplete: evaluation.isDeptHeadComplete,
+      isPeerComplete: evaluation.isPeerComplete,
+      studentCompletedCount: evaluation.studentSubmissionCount,
+      requiredStudentCount: evaluation.studentRequiredCount,
+      incomingPeerCount: evaluation.peerSubmissionCount,
     };
-    const isComplete = completion.isStudentComplete && completion.isDeptHeadComplete && completion.isPeerComplete;
-    const evaluated = computeEvaluation(studentScore, deptHeadScore, peerScore);
-    const finalScore = isComplete ? evaluated.totalScore : null;
+    const isComplete = evaluation.isComplete;
+    const finalScore = evaluation.totalScore;
     const collectFeedback = (values) => [...new Set(values
       .map((value) => sanitizeEvaluationFeedback(value))
       .filter(Boolean))];
@@ -199,6 +166,14 @@ router.get('/my-performance', authenticateToken, authorizeRoles('lab_assistant',
         final_score: finalScore,
         average_score: finalScore,
         total_evaluations: studentRows.length + peerRows.length + deptHeadRows.length,
+        has_assigned_courses: evaluation.hasAssignedCourses,
+        student_weight: evaluation.weights.student,
+        peer_weight: evaluation.weights.peer,
+        dept_head_weight: evaluation.weights.deptHead,
+        active_weight: evaluation.activeWeight,
+        student_weighted: evaluation.studentWeighted,
+        peer_weighted: evaluation.peerWeighted,
+        dept_head_weighted: evaluation.deptHeadWeighted,
         strengths,
         improvements,
       },
@@ -210,6 +185,12 @@ router.get('/my-performance', authenticateToken, authorizeRoles('lab_assistant',
       isComplete,
       statusBadge: isComplete ? 'Completed' : 'Pending Complete Evaluation',
       completion,
+      student_completed: evaluation.studentSubmissionCount,
+      student_required: evaluation.studentRequiredCount,
+      peer_completed: evaluation.peerSubmissionCount,
+      hasAssignedCourses: evaluation.hasAssignedCourses,
+      weights: evaluation.weights,
+      breakdown: evaluation.breakdown,
       strengths,
       improvements,
     };
@@ -280,6 +261,7 @@ router.get('/peer-evaluation-targets', authenticateToken, authorizeRoles('lab_as
       college_name: row.college_name || 'N/A',
       target_role: row.target_role,
       status: row.evaluation_status || 'pending',
+      score_percentage: row.score_percentage ?? row.total_score ?? null,
       total_score: row.total_score || 0,
       is_evaluated: row.evaluation_status === 'completed',
       submission_id: row.submission_id || null,
@@ -338,6 +320,10 @@ router.post('/evaluate-peer', authenticateToken, authorizeRoles('lab_assistant')
         [evaluatorId]
       );
       evaluatorDepartmentId = Number(evaluatorProfile?.department_id || 0);
+    }
+    const deadline = await getDepartmentEvaluationDeadline(connection, evaluatorDepartmentId, { ensureTable: false });
+    if (deadline.autoLock && isEvaluationDeadlineExpired(deadline.deadlineAt)) {
+      return res.status(400).json({ success: false, message: EVALUATION_PERIOD_EXPIRED_MESSAGE });
     }
     if (!evaluatorDepartmentId || !await isPeerEvaluationOpen(evaluatorDepartmentId, academicYear, semester)) {
       return res.status(403).json({ success: false, message: 'Peer evaluation is not currently active for your department.' });

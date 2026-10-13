@@ -158,7 +158,7 @@ const getStudentInsights = async ({ userId }) => {
       AND LOWER(COALESCE(ed.evaluation_type, 'student')) IN ('student', 'lab_assistant_student')
       AND LOWER(COALESCE(ed.status, 'pending')) <> 'closed'
     LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
-      AND LOWER(COALESCE(ses.status, 'pending')) IN ('submitted', 'completed', 'approved')
+      AND LOWER(COALESCE(ses.status, 'pending')) IN ('submitted', 'completed', 'approved', 'published', 'evaluated')
     WHERE s.user_id = ?
   `, [userId]);
   const [feedbackRows] = await pool.query(`
@@ -166,7 +166,7 @@ const getStudentInsights = async ({ userId }) => {
     FROM students s
     INNER JOIN evaluation_dispatches ed ON ed.student_id = s.id
     INNER JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
-      AND LOWER(COALESCE(ses.status, 'pending')) IN ('submitted', 'completed', 'approved')
+      AND LOWER(COALESCE(ses.status, 'pending')) IN ('submitted', 'completed', 'approved', 'published', 'evaluated')
     WHERE s.user_id = ?
     ORDER BY ses.created_at DESC
     LIMIT 100
@@ -176,12 +176,17 @@ const getStudentInsights = async ({ userId }) => {
   const completionRate = percentage(completedCount, totalAssigned);
   const signals = getFeedbackSignals(feedbackRows, stats?.average_rating_given);
   const pending = number(stats?.pending_count);
+  const feedbackTip = signals.topFeedbackKeywords.length
+    ? `Recurring feedback themes: ${signals.topFeedbackKeywords.join(', ')}.`
+    : pending
+      ? 'Complete the pending evaluation forms and include a specific course activity or lesson in your written feedback.'
+      : 'No written feedback has been submitted yet. Add a specific example when completing your next evaluation.';
   const summary = pending
     ? [`${pending} evaluation${pending === 1 ? '' : 's'} pending.`, stats.next_deadline ? `Next evaluation deadline: ${stats.next_deadline}.` : 'Review pending evaluations before their deadlines.']
     : ['No pending course evaluations were found.'];
   return response(summary, [
     recommendation('Review pending evaluations', 'Complete the next available course evaluation before its deadline.', 'View Evaluations', 'VIEW_PENDING_EVALUATIONS'),
-    recommendation('Improve feedback detail', 'Mention a lecture example, assignment, or classroom activity in written feedback.', 'Review Feedback Tip', 'REVIEW_FEEDBACK_TIP'),
+    recommendation('Improve feedback detail', feedbackTip, 'Review Feedback Tip', 'REVIEW_FEEDBACK_TIP'),
   ], signals.sentiment, undefined, {
     averageScore: stats?.average_rating_given,
     averageRatingGiven: number(stats?.average_rating_given),
@@ -193,6 +198,7 @@ const getStudentInsights = async ({ userId }) => {
     nextDeadline: stats?.next_deadline || null,
     topFeedbackKeywords: signals.topFeedbackKeywords,
     feedbackCount: signals.feedbackCount,
+    feedbackTip,
   });
 };
 

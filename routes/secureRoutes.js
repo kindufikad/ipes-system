@@ -5,6 +5,7 @@ const XLSX = require('xlsx');
 const pool = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { SYSTEM_ADMIN_CONFLICT_MESSAGE, getActiveSystemAdmin, isActiveSystemAdminUniqueError, isSystemAdminRole } = require('../utils/systemAdminPolicy');
+const { getDepartmentEvaluationDeadline, isEvaluationDeadlineExpired, EVALUATION_PERIOD_EXPIRED_MESSAGE } = require('../services/evaluationDeadlineService');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_DEFAULT_PASSWORD || 'admin@123';
@@ -760,6 +761,11 @@ router.get('/submissions', async (req, res) => {
 
 router.post('/submissions', async (req, res) => {
   try {
+    const departmentId = req.user?.department_id || req.body?.department_id;
+    const deadline = await getDepartmentEvaluationDeadline(pool, departmentId);
+    if (deadline.autoLock && isEvaluationDeadlineExpired(deadline.deadlineAt)) {
+      return res.status(400).json({ success: false, message: EVALUATION_PERIOD_EXPIRED_MESSAGE });
+    }
     const { submitter_role, submitter_name, instructor_name, course_code, course_name, score = 0, feedback = '', responses = {} } = req.body;
     const [result] = await pool.query(
       'INSERT INTO evaluation_submissions (submitter_role, submitter_name, instructor_name, course_code, course_name, score, feedback, responses) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
@@ -776,6 +782,10 @@ router.post('/submissions', async (req, res) => {
 router.post('/dept-head/evaluations', async (req, res) => {
   try {
     const { evaluator_id, instructor_id, department_id, criteria_scores = {}, total_score = 0 } = req.body;
+    const deadline = await getDepartmentEvaluationDeadline(pool, department_id || req.user?.department_id);
+    if (deadline.autoLock && isEvaluationDeadlineExpired(deadline.deadlineAt)) {
+      return res.status(400).json({ success: false, message: EVALUATION_PERIOD_EXPIRED_MESSAGE });
+    }
 
     if (!evaluator_id || !instructor_id) {
       return res.status(400).json({ 

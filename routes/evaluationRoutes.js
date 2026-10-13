@@ -15,6 +15,7 @@ const {
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { getConsolidatedStudentScore } = require('../controllers/studentEvalController');
 const { getDirectoratePerformance } = require('../controllers/directoratePerformanceController');
+const { getDepartmentEvaluationDeadline } = require('../services/evaluationDeadlineService');
 
 const router = express.Router();
 
@@ -58,30 +59,10 @@ router.get(
   getActiveEvaluationForms
 );
 
-router.get('/active-deadline', authenticateToken, authorizeRoles('student', 'instructor', 'lab_assistant', 'dept_head', 'dean', 'college_dean', 'academic_director', 'directorate', 'admin'), async (req, res) => {
+router.get('/active-deadline', authenticateToken, authorizeRoles('student', 'instructor', 'lab_assistant', 'dept_head', 'dean', 'college_dean', 'academic_director', 'academic_directorate', 'directorate', 'academic_vice_president', 'admin'), async (req, res) => {
   const departmentId = Number(req.user?.department_id || req.user?.departmentId || req.user?.department || 0);
   try {
-    if (!departmentId) return res.json({ deadlineAt: null, autoLock: true });
-    await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_deadline_settings (
-      department_id INT UNSIGNED PRIMARY KEY,
-      deadline_at DATETIME NULL,
-      auto_lock TINYINT(1) NOT NULL DEFAULT 1,
-      updated_by INT UNSIGNED NULL,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-    const [[settings]] = await pool.query('SELECT deadline_at, auto_lock FROM evaluation_deadline_settings WHERE department_id = ? LIMIT 1', [departmentId]);
-    let dispatch = null;
-    if (!settings?.deadline_at) {
-      [[dispatch]] = await pool.query(`
-      SELECT deadline FROM evaluation_dispatches
-      WHERE department_id = ? AND deadline IS NOT NULL
-        AND LOWER(COALESCE(status, 'pending')) IN ('pending', 'active', 'published')
-      ORDER BY id DESC LIMIT 1`, [departmentId]);
-    }
-    return res.json({
-      deadlineAt: settings?.deadline_at || dispatch?.deadline || null,
-      autoLock: settings ? settings.auto_lock !== 0 : true,
-    });
+    return res.json(await getDepartmentEvaluationDeadline(pool, departmentId));
   } catch (error) {
     console.error('Active evaluation deadline fetch failed:', error);
     return res.status(500).json({ message: 'Unable to load active evaluation deadline.' });

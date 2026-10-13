@@ -206,7 +206,11 @@ const calculateAndSaveInstructorResult = async (instructorId, academicYear, seme
     directorateRawScore: deptHeadPercentage,
     isTeaching: roleStatus.isTeaching || totalStudentsEvaluatedCount > 0,
   });
-  const totalScore = score.finalScore;
+  const totalDeptHeadEvaluatedCount = Number(deptHeadRow?.total_dept_head_evaluated_count || 0);
+  const isComplete = (score.role !== 'Teaching' || totalStudentsEvaluatedCount > 0)
+    && totalPeersEvaluatedCount > 0
+    && totalDeptHeadEvaluatedCount > 0;
+  const totalScore = isComplete ? score.finalScore : 0;
 
   await database.query(
     `INSERT INTO evaluation_results
@@ -257,7 +261,9 @@ const calculateAndSaveInstructorResult = async (instructorId, academicYear, seme
     raw_subtotal: score.rawSubtotal,
     total_students_evaluated_count: totalStudentsEvaluatedCount,
     total_peers_evaluated_count: totalPeersEvaluatedCount,
-    total_dept_head_evaluated_count: Number(deptHeadRow?.total_dept_head_evaluated_count || 0),
+    total_dept_head_evaluated_count: totalDeptHeadEvaluatedCount,
+    isComplete,
+    status: isComplete ? 'Completed' : 'Pending Complete Evaluation',
     total_score: totalScore,
     final_score: totalScore,
   };

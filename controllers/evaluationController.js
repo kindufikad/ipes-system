@@ -3,6 +3,12 @@ const { createNotifications } = require('./notificationController');
 const { validateEvaluationFeedbackPair } = require('../utils/validationUtility');
 const { calculateAndSaveInstructorResult } = require('../utils/evaluationCalculator');
 const { calculateLikertPercentage } = require('../utils/likertScoring');
+const {
+  ensureEvaluationDeadlineSettingsTable,
+  getDepartmentEvaluationDeadline,
+  isEvaluationDeadlineExpired,
+  EVALUATION_PERIOD_EXPIRED_MESSAGE,
+} = require('../services/evaluationDeadlineService');
 
 const ACADEMIC_DIRECTORATE_RATING_KEYS = [
   'leadership',
@@ -14,6 +20,7 @@ const ACADEMIC_DIRECTORATE_RATING_KEYS = [
 
 exports.getAcademicDirectorateCandidates = async (req, res) => {
   try {
+    await ensureEvaluationDeadlineSettingsTable(pool);
     await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_periods (
       id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
       academic_year VARCHAR(64) NOT NULL,
@@ -31,11 +38,19 @@ exports.getAcademicDirectorateCandidates = async (req, res) => {
         COALESCE(NULLIF(TRIM(CONCAT_WS(' ', i.first_name, i.last_name)), ''), u.email) AS full_name,
         u.email, u.role,
         i.employee_id,
+        i.department_id,
         COALESCE(d.department_name, d.name) AS department_name,
         c.name AS college_name,
         active_period.academic_year,
         active_period.semester,
-        active_period.deadline,
+        COALESCE(
+          deadline_setting.deadline_at,
+          (SELECT ed.deadline FROM evaluation_dispatches ed
+           WHERE ed.department_id = i.department_id AND ed.deadline IS NOT NULL
+             AND LOWER(COALESCE(ed.status, 'pending')) IN ('pending', 'active', 'published')
+           ORDER BY ed.id DESC LIMIT 1)
+        ) AS deadline,
+        COALESCE(deadline_setting.auto_lock, 1) AS deadline_auto_lock,
         evaluation.id AS evaluation_id,
         evaluation.status AS evaluation_status,
         evaluation.score AS evaluation_score,
@@ -47,6 +62,7 @@ exports.getAcademicDirectorateCandidates = async (req, res) => {
       LEFT JOIN instructors i ON i.user_id = u.id
       LEFT JOIN departments d ON d.id = i.department_id
       LEFT JOIN colleges c ON c.id = d.college_id
+      LEFT JOIN evaluation_deadline_settings deadline_setting ON deadline_setting.department_id = i.department_id
       LEFT JOIN (
         SELECT academic_year, semester, deadline
         FROM evaluation_periods
@@ -107,13 +123,18 @@ exports.evaluateAcademicDirectorate = async (req, res) => {
 
   try {
     const [[candidate]] = await pool.query(
-      `SELECT id FROM users
-       WHERE id = ? AND LOWER(role) IN ('academic_directorate', 'academic_director', 'directorate')
-         AND LOWER(COALESCE(status, 'active')) = 'active'
+      `SELECT u.id, i.department_id
+       FROM users u LEFT JOIN instructors i ON i.user_id = u.id
+       WHERE u.id = ? AND LOWER(u.role) IN ('academic_directorate', 'academic_director', 'directorate')
+         AND LOWER(COALESCE(u.status, 'active')) = 'active'
        LIMIT 1`,
       [academicDirectorateId]
     );
     if (!candidate) return res.status(404).json({ message: 'Active Academic Directorate candidate not found.' });
+    const deadline = await getDepartmentEvaluationDeadline(pool, candidate.department_id);
+    if (deadline.autoLock && isEvaluationDeadlineExpired(deadline.deadlineAt)) {
+      return res.status(400).json({ message: EVALUATION_PERIOD_EXPIRED_MESSAGE });
+    }
 
     const values = ACADEMIC_DIRECTORATE_RATING_KEYS
       .map((key) => ratings[key])
@@ -178,6 +199,11 @@ exports.submitDepartmentHeadEvaluation = async (req, res) => {
 
     const evaluatorId = req.user.id;
     const departmentId = req.user.department_id || req.user.departmentId;
+    const deadline = await getDepartmentEvaluationDeadline(connection, departmentId, { ensureTable: false });
+    if (deadline.autoLock && isEvaluationDeadlineExpired(deadline.deadlineAt)) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: EVALUATION_PERIOD_EXPIRED_MESSAGE });
+    }
 
     // Verify target exists based on type
     if (targetTypeNormalized === 'instructor') {
@@ -352,6 +378,12 @@ exports.submitStudentEvaluation = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Student record not found' });
     }
 
+    const deadlineSettings = await getDepartmentEvaluationDeadline(connection, student.department_id, { ensureTable: false });
+    if (deadlineSettings.autoLock && isEvaluationDeadlineExpired(deadlineSettings.deadlineAt)) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: EVALUATION_PERIOD_EXPIRED_MESSAGE });
+    }
+
     const [[dispatch]] = await connection.query(
             `SELECT ed.id, ed.student_id, ed.assignment_id, ed.course_id, ed.course_name,
               ed.academic_year, ed.semester,
@@ -375,15 +407,6 @@ exports.submitStudentEvaluation = async (req, res) => {
         success: false,
         message: 'Evaluation dispatch not found',
       });
-    }
-
-    const [[deadlineSettings]] = await connection.query(
-      'SELECT deadline_at, auto_lock FROM evaluation_deadline_settings WHERE department_id = ? LIMIT 1',
-      [student.department_id]
-    ).catch(() => [[null]]);
-    if (deadlineSettings?.auto_lock && deadlineSettings.deadline_at && new Date(deadlineSettings.deadline_at).getTime() <= Date.now()) {
-      await connection.rollback();
-      return res.status(400).json({ success: false, message: 'The evaluation deadline has passed. Please contact your Department Head.' });
     }
 
     const submissionValues = [

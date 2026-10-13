@@ -3,8 +3,10 @@ const { BOT_TOKEN, ROLE_LABELS, BOT_URL, getDashboardUrl } = require('../config'
 const {
   findUserByEmailOrId,
   findUserByPhone,
+  findUserForContactLink,
   findUserByTelegramChat,
   linkTelegramChatIfAvailable,
+  linkTelegramContactIfAvailable,
   clearTelegramChat,
   setUserLanguage,
   getRoleEvaluationStatus,
@@ -13,14 +15,16 @@ const {
 const { setBotInstance } = require('../services/notificationService');
 const { normalizeLanguage, formatEligibilityWarning } = require('../services/localization');
 const { routeMessageByTopic } = require('./topicRouter');
+const { buildEvaluationReminderMessage } = require('../../../utils/evaluationReminderMessage');
 
 const pendingLinkMap = new Map();
 const selectedLanguages = new Map();
 
 const MESSAGES = {
   en: {
-    login: 'Login', statusButton: 'Check Status', profileButton: 'My Profile', shareContact: 'Share Contact', cancel: 'Cancel',
+    login: 'Login', statusButton: '📊 Check Status', profileButton: '👤 My Profile', shareContact: '📱 Link Phone Number', cancel: 'Cancel',
     start: 'Welcome to the IPES Telegram Bot. Link your account or view your profile and evaluation status.',
+    startUnlinked: '👋 Welcome to IPES! Please tap “📱 Link Phone Number” below and share your own contact to receive evaluation updates.',
     privateStart: 'Please use this bot in a private chat for secure IPES account linking.',
     privateLink: 'Please link your IPES account in a private chat.',
     loginInstruction: 'Share your Telegram contact or enter your registered University email address to link your IPES account.',
@@ -46,7 +50,14 @@ const MESSAGES = {
     languagePendingSave: 'Language selected for this chat. Link your IPES account to save the preference.',
     languageError: 'Unable to save your language preference right now. Please try again.',
     sharePhonePrompt: 'Share your own phone number to connect your IPES account.',
-    phoneNoMatch: 'We could not match this phone number. Update it in your IPES Web Profile at http://localhost:3000/profile, then try again.',
+    phoneNoMatch: 'We could not match this phone number. Add or update it in IPES Profile Settings, then share your contact again.',
+    studentIdPrompt: 'Please enter your Student ID to verify your IPES account.',
+    staffEmailPrompt: 'Please enter your official university email address (e.g. name@mkau.edu.et) to verify your IPES account.',
+    accountIdentifierPrompt: 'Enter your Student ID if you are a student, or your official university email if you are an instructor or lab assistant.',
+    chooseContactRole: 'We could not identify your IPES account from that phone number. Choose your role to continue:',
+    contactStudentRole: 'Student', contactStaffRole: 'Instructor / Lab Assistant',
+    identifierRoleMismatch: 'That identifier does not match the account type linked to the shared contact. Please enter the requested identifier.',
+    invalidStaffEmail: 'Please use your official @mkau.edu.et university email address.',
     phoneAlreadyLinked: 'This IPES account is already connected to another Telegram account. Contact your administrator for help.',
     chatAlreadyLinked: 'This Telegram account is already connected to another IPES account. Use /logout first or contact your administrator.',
     contactWelcome: '🎉 Welcome {name}! Your account is now fully connected.',
@@ -63,8 +74,9 @@ const MESSAGES = {
     roleNames: { student: 'Student', lab_assistant: 'Lab Assistant', instructor: 'Instructor', dept_head: 'Department Head', college_dean: 'College Dean', academic_director: 'Academic Director', system_admin: 'System Admin' },
   },
   am: {
-    login: 'ግባ', statusButton: 'ሁኔታ ይመልከቱ', profileButton: 'የእኔ መገለጫ', shareContact: 'ኮንታክት አጋራ', cancel: 'ሰርዝ',
+    login: 'ግባ', statusButton: '📊 ሁኔታ ይመልከቱ', profileButton: '👤 የእኔ መገለጫ', shareContact: '📱 ስልክ ቁጥር አገናኝ', cancel: 'ሰርዝ',
     start: 'እንኳን ወደ IPES ቴሌግራም ቦት በደህና መጡ። መለያዎን ያገናኙ ወይም የመገለጫዎንና የምዘና ሁኔታዎን ይመልከቱ።',
+    startUnlinked: '👋 እንኳን ወደ IPES በደህና መጡ! የምዘና ማሳወቂያዎችን ለማግኘት ከታች ያለውን “📱 ስልክ ቁጥር አገናኝ” ተጭነው የራስዎን ኮንታክት ያጋሩ።',
     privateStart: 'ለደህንነት የIPES መለያ ማገናኘት እባክዎ ይህን ቦት በግል ውይይት ይጠቀሙ።',
     privateLink: 'እባክዎ የIPES መለያዎን በግል ውይይት ያገናኙ።',
     loginInstruction: 'የIPES መለያዎን ለማገናኘት የቴሌግራም ኮንታክትዎን ያጋሩ ወይም የተመዘገቡበትን የዩኒቨርሲቲ ኢሜይል ያስገቡ።',
@@ -90,7 +102,14 @@ const MESSAGES = {
     languagePendingSave: 'ቋንቋው ለዚህ ውይይት ተመርጧል። ምርጫውን ለማስቀመጥ የIPES መለያዎን ያገናኙ።',
     languageError: 'የቋንቋ ምርጫዎን ማስቀመጥ አልተቻለም። እባክዎ እንደገና ይሞክሩ።',
     sharePhonePrompt: 'የIPES መለያዎን ለማገናኘት የራስዎን ስልክ ቁጥር ያጋሩ።',
-    phoneNoMatch: 'ይህን ስልክ ቁጥር ማዛመድ አልተቻለም። በIPES ድረ-ገጽ መገለጫዎ http://localhost:3000/profile ላይ ያዘምኑትና እንደገና ይሞክሩ።',
+    phoneNoMatch: 'ይህን ስልክ ቁጥር ማዛመድ አልተቻለም። በIPES Profile Settings ላይ ያክሉት ወይም ያዘምኑትና ኮንታክትዎን እንደገና ያጋሩ።',
+    studentIdPrompt: 'እባክዎ የትምህርት ቤት መለያ ቁጥርዎን (Student ID) ያስገቡ (ለምሳሌ: mau1600756):',
+    staffEmailPrompt: 'እባክዎ የኦፊሴላዊ ኢሜይል አድራሻዎን ያስገቡ (e.g. name@mkau.edu.et):',
+    accountIdentifierPrompt: 'ተማሪ ከሆኑ Student ID ያስገቡ፤ መምህር ወይም የላብራቶሪ ረዳት ከሆኑ ኦፊሴላዊ የዩኒቨርሲቲ ኢሜይልዎን ያስገቡ።',
+    chooseContactRole: 'በዚህ ስልክ ቁጥር የIPES መለያዎን ማወቅ አልተቻለም። ለመቀጠል ሚናዎን ይምረጡ፦',
+    contactStudentRole: 'ተማሪ', contactStaffRole: 'መምህር / የላብራቶሪ ረዳት',
+    identifierRoleMismatch: 'ያስገቡት መለያ ከተጋራው ኮንታክት የመለያ አይነት ጋር አይዛመድም። እባክዎ የተጠየቀውን መለያ ያስገቡ።',
+    invalidStaffEmail: 'እባክዎ ይፋዊውን @mkau.edu.et የዩኒቨርሲቲ ኢሜይል ይጠቀሙ።',
     phoneAlreadyLinked: 'ይህ የIPES መለያ ከሌላ የቴሌግራም መለያ ጋር ተገናኝቷል። እባክዎ አስተዳዳሪውን ያነጋግሩ።',
     chatAlreadyLinked: 'ይህ የቴሌግራም መለያ ከሌላ የIPES መለያ ጋር ተገናኝቷል። /logout ይጠቀሙ ወይም አስተዳዳሪውን ያነጋግሩ።',
     contactWelcome: '🎉 እንኳን ደህና መጡ {name}! መለያዎ በተሳካ ሁኔታ ተገናኝቷል።',
@@ -132,15 +151,19 @@ const buildLanguageKeyboard = () => Markup.inlineKeyboard([
   [Markup.button.callback('🇪🇹 አማርኛ', 'telegram_language_am')],
   [Markup.button.callback('🇬🇧 English', 'telegram_language_en')],
 ]);
-const buildContactKeyboard = () => Markup.keyboard([[
-  Markup.button.contactRequest('📱 Share My Contact / ስልክ ቁጥር አጋራ'),
+const buildContactKeyboard = (language) => Markup.keyboard([[
+  Markup.button.contactRequest(t(language, 'shareContact')),
 ]]).resize().oneTime();
 const buildLoginKeyboard = (language) => Markup.keyboard([
   [Markup.button.contactRequest(t(language, 'shareContact'))], [t(language, 'cancel')],
 ]).resize().oneTime();
-const buildLinkedKeyboard = (language) => Markup.inlineKeyboard([
-  [Markup.button.callback('📊 Check Status', 'telegram_status'), Markup.button.callback('👤 My Profile', 'telegram_profile')],
+const buildContactRoleKeyboard = (language) => Markup.inlineKeyboard([
+  [Markup.button.callback(t(language, 'contactStudentRole'), 'telegram_contact_role_student')],
+  [Markup.button.callback(t(language, 'contactStaffRole'), 'telegram_contact_role_staff')],
 ]);
+const buildLinkedKeyboard = (language) => Markup.keyboard([[
+  t(language, 'statusButton'), t(language, 'profileButton'),
+]]).resize().persistent();
 
 const promptLogin = async (ctx) => {
   const language = await getChatLanguage(ctx);
@@ -149,8 +172,8 @@ const promptLogin = async (ctx) => {
   return ctx.reply(t(language, 'loginInstruction'), buildLoginKeyboard(language));
 };
 
-const replyWithStatus = async (ctx) => {
-  const language = 'en';
+const handleCheckStatus = async (ctx) => {
+  const language = await getChatLanguage(ctx);
   let user;
   let status;
   try {
@@ -166,10 +189,10 @@ const replyWithStatus = async (ctx) => {
   if (user.role === 'student') {
     const pendingRows = status.rows.filter((row) => row.status === 'Pending').slice(0, 8);
     const pendingText = pendingRows.length
-      ? `\n${t(language, 'pending')}\n${pendingRows.map((row) => `• ${row.course_name || row.course_code || 'Course'}${row.instructor_name ? ` - ${row.instructor_name}` : ''}`).join('\n')}`
+      ? `\n${t(language, 'pending')}\n${pendingRows.map((row) => `- ${row.course_code || row.courseCode || 'N/A'} - ${row.course_name || row.courseName || 'Course'} - ${row.instructor_name || row.instructorName || 'N/A'}`).join('\n')}`
       : `\n${t(language, 'noPending')}`;
     try {
-      await ctx.reply(`${t(language, 'statusSummary', status)}${pendingText}`);
+      await ctx.reply(`${t(language, 'statusSummary', status)}${pendingText}`, buildLinkedKeyboard(language));
     } catch (error) {
       console.error('[TELEGRAM] Evaluation status message delivery failed:', error.message);
       return;
@@ -195,37 +218,46 @@ const replyWithStatus = async (ctx) => {
     return;
   }
   if (['instructor', 'lab_assistant', 'dept_head'].includes(user.role)) {
-    const pendingRows = status.rows.filter((row) => row.completion_status === 'Pending').slice(0, 8);
-    const pendingText = pendingRows.length
-      ? `\n${t(language, 'pendingPeers')}\n${pendingRows.map((row) => `• ${row.target_name || 'Assigned peer evaluation'}`).join('\n')}`
-      : `\n${t(language, 'noPendingPeers')}`;
+    const pendingRows = status.rows.filter((row) => row.completion_status === 'Pending');
+    if (!pendingRows.length) return ctx.reply(t(language, 'noPendingPeers'), buildLinkedKeyboard(language));
+    const reminder = buildEvaluationReminderMessage({
+      name: user.name,
+      pendingCount: pendingRows.length,
+      pendingItems: pendingRows.map((row) => `${row.target_name || 'Assigned peer evaluation'}${row.target_department ? ` (${row.target_department})` : ''}`),
+    });
+    const dashboardUrl = getDashboardUrl(user.role);
     try {
-      return await ctx.reply(`${t(language, 'peerStatus', status)}${pendingText}`);
+      const reminderMessage = await ctx.reply(reminder, {
+        parse_mode: 'HTML',
+        ...(dashboardUrl ? { reply_markup: { inline_keyboard: [[{ text: t(language, 'dashboard'), url: dashboardUrl }]] } } : {}),
+        ...(!dashboardUrl ? buildLinkedKeyboard(language) : {}),
+      });
+      if (dashboardUrl) await ctx.reply(t(language, 'start'), buildLinkedKeyboard(language));
+      return reminderMessage;
     } catch (error) {
       console.error('[TELEGRAM] Peer status message delivery failed:', error.message);
       return;
     }
   }
   try {
-    return await ctx.reply(t(language, 'scopeStatus', { role: roleLabel(language, user.role), ...status }));
+    return await ctx.reply(t(language, 'scopeStatus', { role: roleLabel(language, user.role), ...status }), buildLinkedKeyboard(language));
   } catch (error) {
     console.error('[TELEGRAM] Scoped status message delivery failed:', error.message);
   }
 };
 
-const replyWithProfile = async (ctx) => {
+const handleMyProfile = async (ctx) => {
   try {
+    const language = await getChatLanguage(ctx);
     const user = await findUserByTelegramChat(String(ctx.chat.id));
-    if (!user) return ctx.reply(t('en', 'notLinked'), buildStartKeyboard('en'));
-    return ctx.reply([
-      '👤 User Profile Details',
-      '',
-      `• Full Name: ${user.name || 'N/A'}`,
-      `• Role: ${ROLE_LABELS[user.role] || user.role || 'N/A'}`,
-      `• Department: ${user.department_name || 'N/A'}`,
-      `• Email: ${user.email || 'N/A'}`,
-      `• ID: ${user.profile_id || user.email || 'N/A'}`,
-    ].join('\n'));
+    if (!user) return ctx.reply(t(language, 'notLinked'), buildStartKeyboard(language));
+    return ctx.reply(t(language, 'profile', {
+      name: user.name || 'N/A',
+      role: ROLE_LABELS[user.role] || user.role || 'N/A',
+      department: user.department_name || 'N/A',
+      email: user.email || 'N/A',
+      id: user.profile_id || user.email || 'N/A',
+    }), buildLinkedKeyboard(language));
   } catch (error) {
     console.error('[TELEGRAM] Profile query failed:', error.message);
     return ctx.reply(t('en', 'statusError'));
@@ -279,6 +311,63 @@ const linkAccount = async (ctx, identifier) => {
   }), buildLinkedKeyboard(preferredLanguage));
 };
 
+const getContactIdentifierPrompt = (language, role) => {
+  if (role === 'student') return t(language, 'studentIdPrompt');
+  if (role) return t(language, 'staffEmailPrompt');
+  return t(language, 'accountIdentifierPrompt');
+};
+
+const completeContactLink = async (ctx, identifier, pendingLink) => {
+  const chatId = String(ctx.chat.id);
+  const selectedLanguage = selectedLanguages.get(chatId);
+  let language = normalizeLanguage(selectedLanguage || await getChatLanguage(ctx));
+  const user = await findUserForContactLink(identifier);
+  if (user?.ambiguous) return ctx.reply(t(language, 'ambiguous'));
+  if (!user) return ctx.reply(t(language, 'noAccount'));
+  if (!user.allowed) {
+    pendingLinkMap.delete(chatId);
+    return ctx.reply(t(language, 'roleDenied'));
+  }
+  if (pendingLink.expectedRole !== 'student'
+    && !/^[^\s@]+@mkau\.edu\.et$/i.test(String(identifier || '').trim())) {
+    return ctx.reply(t(language, 'invalidStaffEmail'));
+  }
+  const roleMismatch = pendingLink.expectedRole === 'staff'
+    ? !['instructor', 'lab_assistant'].includes(user.role)
+    : pendingLink.expectedRole && user.role !== pendingLink.expectedRole;
+  if (roleMismatch) {
+    return ctx.reply(t(language, 'identifierRoleMismatch'));
+  }
+
+  const phoneOwner = await findUserByPhone(pendingLink.phoneNumber, user.id);
+  if (phoneOwner?.ambiguous || (phoneOwner && Number(phoneOwner.id) !== Number(user.id))) {
+    return ctx.reply(t(language, 'phoneNoMatch'));
+  }
+  if (user.telegram_chat_id && String(user.telegram_chat_id) !== chatId) {
+    pendingLinkMap.delete(chatId);
+    return ctx.reply(t(language, 'accountLinkedElsewhere'));
+  }
+  const existingLink = await findUserByTelegramChat(chatId);
+  if (existingLink && Number(existingLink.id) !== Number(user.id)) {
+    pendingLinkMap.delete(chatId);
+    return ctx.reply(t(language, 'telegramLinkedElsewhere'));
+  }
+
+  language = normalizeLanguage(selectedLanguage || user.language || language);
+  const linked = await linkTelegramContactIfAvailable(user.id, user.role, chatId, pendingLink.phoneNumber);
+  if (!linked) {
+    pendingLinkMap.delete(chatId);
+    return ctx.reply(t(language, 'phoneAlreadyLinked'));
+  }
+  if (selectedLanguage) await setUserLanguage(user.id, selectedLanguage);
+  pendingLinkMap.delete(chatId);
+  selectedLanguages.delete(chatId);
+  await ctx.reply(t(language, 'contactWelcome', { name: user.name || 'IPES User' }), Markup.removeKeyboard());
+  return ctx.reply(t(language, 'welcome', {
+    name: user.name || 'IPES User', role: roleLabel(language, user.role),
+  }), buildLinkedKeyboard(language));
+};
+
 const createBot = () => {
   if (!BOT_TOKEN) {
     console.warn('Telegram bot not initialized because BOT_TOKEN is missing.');
@@ -298,13 +387,14 @@ const createBot = () => {
 
   bot.start(async (ctx) => {
     if (ctx.chat?.type !== 'private') return ctx.reply(t('en', 'privateStart'));
+    const language = await getChatLanguage(ctx);
     const user = await findUserByTelegramChat(String(ctx.chat.id));
-    if (user) return ctx.reply(`👋 Welcome to the IPES Smart Assistance Bot!\n\n${BOT_URL}`, buildLinkedKeyboard('en'));
-    return ctx.reply(`👋 Welcome to the IPES Smart Assistance Bot!\n\n${BOT_URL}\n\nShare your contact to connect your IPES account.`, buildContactKeyboard());
+    if (user) return ctx.reply(`${t(language, 'start')}\n\n${BOT_URL}`, buildLinkedKeyboard(language));
+    return ctx.reply(`${t(language, 'startUnlinked')}\n\n${BOT_URL}`, buildContactKeyboard(language));
   });
   bot.command('login', promptLogin);
-  bot.command('status', replyWithStatus);
-  bot.command('profile', replyWithProfile);
+  bot.command('status', handleCheckStatus);
+  bot.command('profile', handleMyProfile);
   bot.command('language', async (ctx) => {
     const language = await getChatLanguage(ctx);
     return ctx.reply(t(language, 'languagePrompt'), buildLanguageKeyboard());
@@ -312,8 +402,21 @@ const createBot = () => {
   bot.command('logout', logoutAccount);
 
   bot.action('telegram_login', async (ctx) => { await ctx.answerCbQuery(); return promptLogin(ctx); });
-  bot.action('telegram_status', async (ctx) => { await ctx.answerCbQuery(); return replyWithStatus(ctx); });
-  bot.action('telegram_profile', async (ctx) => { await ctx.answerCbQuery(); return replyWithProfile(ctx); });
+  bot.action('telegram_status', async (ctx) => { await ctx.answerCbQuery(); return handleCheckStatus(ctx); });
+  bot.action('telegram_profile', async (ctx) => { await ctx.answerCbQuery(); return handleMyProfile(ctx); });
+  bot.action(/^telegram_contact_role_(student|staff)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const chatId = String(ctx.chat.id);
+    const pendingLink = pendingLinkMap.get(chatId);
+    if (pendingLink?.step !== 'awaiting_contact_role') return ctx.reply(t(await getChatLanguage(ctx), 'sharePhonePrompt'));
+    const language = normalizeLanguage(selectedLanguages.get(chatId) || await getChatLanguage(ctx));
+    pendingLinkMap.set(chatId, {
+      ...pendingLink,
+      step: 'awaiting_contact_identifier',
+      expectedRole: ctx.match[1],
+    });
+    return ctx.reply(getContactIdentifierPrompt(language, ctx.match[1]), Markup.removeKeyboard());
+  });
   for (const language of ['am', 'en']) {
     bot.action(`telegram_language_${language}`, async (ctx) => {
       await ctx.answerCbQuery();
@@ -344,25 +447,27 @@ const createBot = () => {
     const contact = ctx.message.contact;
     if (!contact.user_id || Number(contact.user_id) !== Number(ctx.from.id)) return ctx.reply(t(language, 'shareOwnContact'));
 
-    const user = await findUserByPhone(contact.phone_number);
-    if (user?.ambiguous) return ctx.reply(t(language, 'phoneNoMatch'));
-    if (!user) return ctx.reply(t(language, 'phoneNoMatch'));
-    language = normalizeLanguage(selectedLanguage || user.language || language);
-    if (user.telegram_chat_id && String(user.telegram_chat_id) !== String(ctx.chat.id)) {
+    const matchedUser = await findUserByPhone(contact.phone_number);
+    if (matchedUser && !matchedUser.allowed) return ctx.reply(t(language, 'roleDenied'));
+    if (matchedUser?.telegram_chat_id && String(matchedUser.telegram_chat_id) !== chatId) {
       return ctx.reply(t(language, 'phoneAlreadyLinked'));
     }
-    const existingLink = await findUserByTelegramChat(chatId);
-    if (existingLink && Number(existingLink.id) !== Number(user.id)) {
-      return ctx.reply(t(language, 'chatAlreadyLinked'));
-    }
-    const linked = await linkTelegramChatIfAvailable(user.id, chatId);
-    if (!linked) return ctx.reply(t(language, 'phoneAlreadyLinked'));
 
-    if (selectedLanguage) await setUserLanguage(user.id, selectedLanguage);
-    pendingLinkMap.delete(chatId);
-    selectedLanguages.delete(chatId);
-    await ctx.reply(t(language, 'contactWelcome', { name: user.name || 'IPES User' }), Markup.removeKeyboard());
-    return ctx.reply(t(language, 'start'), buildLinkedKeyboard(language));
+    if (!matchedUser) {
+      pendingLinkMap.set(chatId, {
+        step: 'awaiting_contact_role',
+        phoneNumber: contact.phone_number,
+      });
+      return ctx.reply(t(language, 'chooseContactRole'), buildContactRoleKeyboard(language));
+    }
+
+    const expectedRole = matchedUser?.role || null;
+    pendingLinkMap.set(chatId, {
+      step: 'awaiting_contact_identifier',
+      phoneNumber: contact.phone_number,
+      expectedRole,
+    });
+    return ctx.reply(getContactIdentifierPrompt(language, expectedRole), Markup.removeKeyboard());
   });
   bot.on('text', async (ctx) => {
     const rawText = ctx.message.text || '';
@@ -373,14 +478,20 @@ const createBot = () => {
       return ctx.reply(language === 'en' ? `This message was routed under topic: ${route || 'general'}` : `ይህ መልዕክት በርዕስ ተመድቧል፦ ${route || 'አጠቃላይ'}`);
     }
     const text = rawText.trim();
-    if (/^(?:📊\s*)?check status$/i.test(text)) return replyWithStatus(ctx);
-    if (/^(?:👤\s*)?my profile$/i.test(text)) return replyWithProfile(ctx);
+    const statusButtonLabels = ['📊 ሁኔታ ይመልከቱ', '📊 Check Status', t(language, 'statusButton')];
+    const profileButtonLabels = ['👤 የእኔ መገልጫ', '👤 የእኔ መገለጫ', '👤 My Profile', t(language, 'profileButton')];
+    if (statusButtonLabels.includes(text)) return handleCheckStatus(ctx);
+    if (profileButtonLabels.includes(text)) return handleMyProfile(ctx);
+    if (/^(?:📊\s*)?check status$/i.test(text)) return handleCheckStatus(ctx);
+    if (/^(?:👤\s*)?my profile$/i.test(text)) return handleMyProfile(ctx);
     if (text.toLowerCase() === 'login' || text === MESSAGES.am.login) return promptLogin(ctx);
     if (text.toLowerCase() === 'cancel' || text === MESSAGES.am.cancel) {
       pendingLinkMap.delete(chatId);
       return ctx.reply(t(language, 'cancelLink'), Markup.removeKeyboard());
     }
-    if (pendingLinkMap.get(chatId)?.step === 'awaiting_identifier') return linkAccount(ctx, text);
+    const pendingLink = pendingLinkMap.get(chatId);
+    if (pendingLink?.step === 'awaiting_contact_identifier') return completeContactLink(ctx, text, pendingLink);
+    if (pendingLink?.step === 'awaiting_identifier') return linkAccount(ctx, text);
     return ctx.reply(t(language, 'generic'));
   });
 

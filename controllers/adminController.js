@@ -1,16 +1,188 @@
 const pool = require('../config/db');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const {
+  createEmailTransporter,
+  encryptSmtpPassword,
+  getEmailConfigFromDatabase,
+  SMTP_SETTING_KEYS,
+  verifyEmailTransporter,
+} = require('../services/emailService');
 const { getSystemHealthSnapshot, triggerDatabaseBackup } = require('../middleware/systemHealth');
 const { SYSTEM_ADMIN_CONFLICT_MESSAGE, getActiveSystemAdmin, isActiveSystemAdminUniqueError, isSystemAdminRole } = require('../utils/systemAdminPolicy');
 const { getInstitutionalEvaluationMetrics } = require('./aiInsightsController');
 const { ASSET_KEYS, getLandingPageSettings, saveLandingPageSettings } = require('../services/landingPageSettings');
 const { updateSecurityControlSettings } = require('../services/securityControlService');
+const { getAutoLockDeadlineEnabled, AUTO_LOCK_DEADLINE_SETTING_KEY } = require('../services/evaluationDeadlineService');
 const DEFAULT_USER_PASSWORD = '12345678';
 
 const landingSettingKeys = new Set(['home_hero_images', 'about_page_image', 'system_logo', 'university_logo']);
 const contactSettingKeys = new Set(['contact_email', 'contact_phone', 'contact_office_hours']);
+const ADMIN_EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@(gmail\.com|mkau\.edu\.et)$/;
+const smtpEmailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const getEmailServiceSettings = async (_req, res) => {
+  try {
+    const keys = Object.values(SMTP_SETTING_KEYS);
+    const [rows] = await pool.query(
+      `SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN (${keys.map(() => '?').join(', ')})`,
+      keys
+    );
+    const settings = Object.fromEntries(rows.map((row) => [row.setting_key, row.setting_value]));
+    return res.json({
+      success: true,
+      data: {
+        senderEmail: settings[SMTP_SETTING_KEYS.senderEmail] || '',
+        host: settings[SMTP_SETTING_KEYS.host] || 'smtp.gmail.com',
+        port: Number(settings[SMTP_SETTING_KEYS.port] || 587),
+        appPasswordConfigured: Boolean(settings[SMTP_SETTING_KEYS.appPassword]),
+      },
+    });
+  } catch (error) {
+    console.error('Unable to load SMTP settings:', error?.message || error);
+    return res.status(500).json({ success: false, message: 'Unable to load Email Service Settings.' });
+  }
+};
+
+const updateEmailServiceSettings = async (req, res) => {
+  const senderEmail = String(req.body?.senderEmail || '').trim().toLowerCase();
+  const host = String(req.body?.host || 'smtp.gmail.com').trim();
+  const port = Number(req.body?.port || 587);
+  const appPassword = String(req.body?.appPassword || '').replace(/\s/g, '');
+  if (!smtpEmailRegex.test(senderEmail) || senderEmail.length > 255) {
+    return res.status(400).json({ success: false, message: 'Enter a valid SMTP sender email address.' });
+  }
+  if (!host || host.length > 255 || /\s/.test(host)) {
+    return res.status(400).json({ success: false, message: 'Enter a valid SMTP host.' });
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return res.status(400).json({ success: false, message: 'SMTP port must be between 1 and 65535.' });
+  }
+  if (appPassword && !/^[A-Za-z0-9]{16}$/.test(appPassword)) {
+    return res.status(400).json({ success: false, message: 'Gmail App Password must contain 16 letters or digits.' });
+  }
+
+  let connection;
+  let transactionStarted = false;
+  try {
+    const [[storedPassword]] = await pool.query(
+      'SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1',
+      [SMTP_SETTING_KEYS.appPassword]
+    );
+    if (!appPassword && !storedPassword?.setting_value) {
+      return res.status(400).json({ success: false, message: 'Enter the SMTP App Password to configure email service.' });
+    }
+    const settings = [
+      [SMTP_SETTING_KEYS.host, host],
+      [SMTP_SETTING_KEYS.port, String(port)],
+      [SMTP_SETTING_KEYS.senderEmail, senderEmail],
+      ...(appPassword ? [[SMTP_SETTING_KEYS.appPassword, encryptSmtpPassword(appPassword)]] : []),
+    ];
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionStarted = true;
+    for (const [key, value] of settings) {
+      await connection.query(
+        `INSERT INTO system_settings (setting_key, setting_value) VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+        [key, value]
+      );
+    }
+    await connection.commit();
+    transactionStarted = false;
+    return res.json({
+      success: true,
+      message: 'Email Service Settings saved securely.',
+      data: { senderEmail, host, port, appPasswordConfigured: true },
+    });
+  } catch (error) {
+    if (transactionStarted) await connection.rollback().catch(() => {});
+    console.error('Unable to save SMTP settings:', error?.message || error);
+    return res.status(500).json({ success: false, message: 'Unable to save Email Service Settings.' });
+  } finally {
+    connection?.release();
+  }
+};
+
+const sendAdminProfileEmailVerification = async (req, res) => {
+  const adminId = Number(req.user?.id);
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  if (!Number.isInteger(adminId) || adminId <= 0) return res.status(401).json({ success: false, message: 'Authentication is required.' });
+  if (!ADMIN_EMAIL_REGEX.test(email) || email.length > 255) {
+    return res.status(400).json({ success: false, message: 'Please enter a valid, complete Gmail address.' });
+  }
+
+  let emailTransport;
+  let codeHash;
+  let verificationCode;
+  let otpStored = false;
+  const devOtpBypass = process.env.NODE_ENV === 'development'
+    && process.env.EMAIL_VERIFICATION_DEV_BYPASS === 'true';
+  try {
+    const [[admin]] = await pool.query(
+      "SELECT id, email FROM users WHERE id = ? AND LOWER(role) = 'admin' AND LOWER(COALESCE(status, 'active')) = 'active' LIMIT 1",
+      [adminId]
+    );
+    if (!admin) return res.status(404).json({ success: false, message: 'Active System Administrator account not found.' });
+    if (String(admin.email || '').trim().toLowerCase() === email) {
+      return res.status(400).json({ success: false, message: 'This email address is already verified on your account.' });
+    }
+
+    const [[existing]] = await pool.query(
+      'SELECT id FROM users WHERE LOWER(TRIM(email)) = ? AND id <> ? LIMIT 1',
+      [email, adminId]
+    );
+    if (existing) return res.status(409).json({ success: false, message: 'Email is already in use by another account.' });
+
+    verificationCode = String(crypto.randomInt(100000, 1000000));
+    codeHash = await bcrypt.hash(verificationCode, 10);
+    await pool.query(
+      `INSERT INTO admin_email_verifications (user_id, email, code_hash, expires_at, attempts)
+       VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE), 0)
+       ON DUPLICATE KEY UPDATE email = VALUES(email), code_hash = VALUES(code_hash),
+         expires_at = VALUES(expires_at), attempts = 0, created_at = CURRENT_TIMESTAMP`,
+      [adminId, email, codeHash]
+    );
+    otpStored = true;
+
+    if (devOtpBypass) console.warn(`[DEV ONLY] Admin email verification OTP for ${email}: ${verificationCode}`);
+    emailTransport = createEmailTransporter(await getEmailConfigFromDatabase(pool));
+    await verifyEmailTransporter(emailTransport.transporter);
+    const delivery = await emailTransport.transporter.sendMail({
+      from: emailTransport.config.from,
+      to: email,
+      subject: 'IPES System Admin email verification code',
+      text: `Your IPES email verification code is ${verificationCode}. It expires in 15 minutes.`,
+    });
+    if (!delivery?.messageId) throw new Error('SMTP accepted no message identifier for the verification email.');
+    return res.json({ success: true, message: 'A 6-digit verification code has been sent to the new email address.' });
+  } catch (error) {
+    if (devOtpBypass && otpStored) {
+      console.warn('SMTP delivery failed; the development OTP remains valid for offline verification.');
+      return res.json({ success: true, message: 'Development verification code logged by the backend.', devBypass: true });
+    }
+    if (otpStored) {
+      try {
+        await pool.query('DELETE FROM admin_email_verifications WHERE user_id = ? AND email = ? AND code_hash = ?', [adminId, email, codeHash]);
+      } catch (cleanupError) {
+        console.error('Unable to clean up undelivered admin email verification code:', cleanupError?.message);
+      }
+    }
+    console.error('Admin profile email verification delivery failed:', { code: error?.code, message: error?.message });
+    if (error?.code === 'EAUTH' || error?.responseCode === 535 || ['EMAIL_CONFIG_INVALID', 'EMAIL_CONFIG_MISSING'].includes(error?.code)) {
+      return res.status(400).json({ success: false, message: 'Invalid SMTP configuration or App Password in System Settings' });
+    }
+    const message = error?.code === 'EMAIL_CONFIG_MISSING'
+      ? 'Email service is not configured. Please contact the system administrator.'
+      : 'Unable to deliver the verification code. Please check the email service configuration and try again.';
+    return res.status(500).json({ success: false, message });
+  } finally {
+    if (emailTransport?.transporter) emailTransport.transporter.close();
+  }
+};
 
 const updateAdminProfile = async (req, res) => {
   const adminId = Number(req.user?.id);
@@ -18,34 +190,133 @@ const updateAdminProfile = async (req, res) => {
   const firstName = String(req.body?.firstName ?? req.body?.first_name ?? '').trim();
   const lastName = String(req.body?.lastName ?? req.body?.last_name ?? '').trim();
   if (!Number.isInteger(adminId) || adminId <= 0) return res.status(401).json({ success: false, message: 'Authentication is required.' });
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255 || !firstName || !lastName || firstName.length > 128 || lastName.length > 128) {
-    return res.status(400).json({ success: false, message: 'A valid email, first name, and last name are required.' });
+  if (!ADMIN_EMAIL_REGEX.test(email) || email.length > 255 || !firstName || !lastName || firstName.length > 128 || lastName.length > 128) {
+    return res.status(400).json({ success: false, message: 'Use a valid @gmail.com or @mkau.edu.et email address and provide first and last names.' });
   }
 
+  let connection;
+  let transactionStarted = false;
   try {
-    const [[admin]] = await pool.query(
-      `SELECT id FROM users WHERE id = ? AND LOWER(role) IN ('admin', 'systemadmin', 'system_admin')
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const [[admin]] = await connection.query(
+      `SELECT id, email FROM users WHERE id = ? AND LOWER(role) = 'admin'
        AND LOWER(COALESCE(status, 'active')) = 'active' LIMIT 1`,
       [adminId]
     );
-    if (!admin) return res.status(404).json({ success: false, message: 'Active System Administrator account not found.' });
+    if (!admin) {
+      await connection.rollback();
+      transactionStarted = false;
+      return res.status(404).json({ success: false, message: 'Active System Administrator account not found.' });
+    }
 
-    const [[existing]] = await pool.query('SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1', [email, adminId]);
-    if (existing) return res.status(409).json({ success: false, message: 'Email is already in use by another account.' });
-
-    await pool.query(
-      `UPDATE users SET email = ?, first_name = ?, last_name = ? WHERE id = ?`,
-      [email, firstName, lastName, adminId]
+    const [[existing]] = await connection.query(
+      'SELECT id FROM users WHERE LOWER(TRIM(email)) = ? AND id <> ? LIMIT 1',
+      [email, adminId]
     );
+    if (existing) {
+      await connection.rollback();
+      transactionStarted = false;
+      return res.status(409).json({ success: false, message: 'Email is already in use by another account.' });
+    }
+
+    const emailChanged = String(admin.email || '').trim().toLowerCase() !== email;
+    if (emailChanged) {
+      const code = String(req.body?.verificationCode ?? req.body?.code ?? '').trim();
+      if (!/^\d{6}$/.test(code)) {
+        await connection.rollback();
+        transactionStarted = false;
+        return res.status(400).json({ success: false, message: 'Enter the 6-digit verification code sent to your new email address.' });
+      }
+      const [[verification]] = await connection.query(
+        `SELECT code_hash, attempts FROM admin_email_verifications
+         WHERE user_id = ? AND email = ? AND expires_at > NOW() LIMIT 1 FOR UPDATE`,
+        [adminId, email]
+      );
+      if (!verification) {
+        await connection.rollback();
+        transactionStarted = false;
+        return res.status(400).json({ success: false, message: 'The verification code is invalid or expired. Request a new code.' });
+      }
+      if (Number(verification.attempts) >= 5) {
+        await connection.rollback();
+        transactionStarted = false;
+        return res.status(429).json({ success: false, message: 'Too many incorrect codes. Request a new verification code.' });
+      }
+      if (!await bcrypt.compare(code, verification.code_hash)) {
+        await connection.query('UPDATE admin_email_verifications SET attempts = attempts + 1 WHERE user_id = ?', [adminId]);
+        await connection.commit();
+        transactionStarted = false;
+        return res.status(400).json({ success: false, message: 'Invalid verification code.' });
+      }
+    }
+
+    await connection.query(
+      "UPDATE users SET email = TRIM(LOWER(?)) WHERE id = ? AND role = 'admin'",
+      [email, adminId]
+    );
+    await connection.query('DELETE FROM admin_email_verifications WHERE user_id = ?', [adminId]);
+    await connection.query(
+      "UPDATE users SET first_name = ?, last_name = ? WHERE id = ? AND role = 'admin'",
+      [firstName, lastName, adminId]
+    );
+    const description = emailChanged
+      ? `Admin profile email updated to ${email}`
+      : `Admin profile details updated for ${email}`;
+    await connection.query(
+      `INSERT INTO audit_logs
+        (action_title, description, performed_by, ip_address, actor_user_id, actor_email, actor_role, category, target_details, route_path, http_method, status_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        'System Admin Profile Updated',
+        description,
+        email,
+        req.ip || null,
+        adminId,
+        admin.email,
+        'admin',
+        'profile',
+        JSON.stringify({ user_id: adminId, previous_email: admin.email, email, first_name: firstName, last_name: lastName }),
+        req.originalUrl || '/api/admin/profile',
+        req.method || 'PUT',
+        200,
+      ]
+    );
+
+    await connection.commit();
+    transactionStarted = false;
+
+    const token = jwt.sign(
+      {
+        id: adminId,
+        email,
+        student_id: req.user.student_id || null,
+        role: 'admin',
+        phone: req.user.phone || null,
+        phone_number: req.user.phone_number || null,
+        department_id: req.user.department_id || null,
+        department_code: req.user.department_code || null,
+        department_name: req.user.department_name || null,
+      },
+      process.env.JWT_SECRET || 'change-this-secret',
+      { expiresIn: '8h' }
+    );
+
     return res.status(200).json({
       success: true,
       message: 'Admin details updated successfully.',
-      user: { id: adminId, email, first_name: firstName, last_name: lastName, name: `${firstName} ${lastName}`.trim(), role: req.user.role },
+      token,
+      user: { id: adminId, email, username: email, first_name: firstName, last_name: lastName, name: `${firstName} ${lastName}`.trim(), role: 'admin' },
     });
   } catch (error) {
+    if (transactionStarted) await connection.rollback().catch(() => {});
     if (error?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Email is already in use by another account.' });
     console.error('Unable to update System Admin profile:', error);
     return res.status(500).json({ success: false, message: 'Failed to update profile details.' });
+  } finally {
+    connection?.release();
   }
 };
 
@@ -135,6 +406,37 @@ const updateContactSetting = async (req, res) => {
   } catch (error) {
     console.error('Unable to update contact setting:', error);
     return res.status(500).json({ success: false, message: 'Unable to save contact setting.' });
+  }
+};
+
+const getAutoLockDeadlineSetting = async (_req, res) => {
+  try {
+    const enabled = await getAutoLockDeadlineEnabled(pool);
+    return res.json({ success: true, auto_lock_enabled: enabled, data: { enabled, auto_lock_enabled: enabled } });
+  } catch (error) {
+    if (['ER_NO_SUCH_TABLE', 'ER_BAD_TABLE_ERROR', 'ER_BAD_FIELD_ERROR'].includes(error?.code)) {
+      return res.status(200).json({ success: true, auto_lock_enabled: false });
+    }
+    console.error('Unable to retrieve evaluation auto-lock setting:', error);
+    return res.status(500).json({ success: false, message: 'Unable to retrieve evaluation auto-lock setting.' });
+  }
+};
+
+const updateAutoLockDeadlineSetting = async (req, res) => {
+  const enabled = req.body?.enabled ?? req.body?.auto_lock_enabled;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ success: false, message: 'An enabled boolean value is required.' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO system_settings (setting_key, setting_value) VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+      [AUTO_LOCK_DEADLINE_SETTING_KEY, enabled ? '1' : '0']
+    );
+    return res.json({ success: true, auto_lock_enabled: enabled, data: { enabled, auto_lock_enabled: enabled } });
+  } catch (error) {
+    console.error('Unable to update evaluation auto-lock setting:', error);
+    return res.status(500).json({ success: false, message: 'Unable to update evaluation auto-lock setting.' });
   }
 };
 
@@ -1443,6 +1745,7 @@ const getRoleCandidates = async (req, res) => {
 
 module.exports = {
   normalizeCollegeDepartmentRows,
+  sendAdminProfileEmailVerification,
   updateAdminProfile,
   getAdminDashboardStats,
   getDepartmentAnalytics,
@@ -1475,4 +1778,8 @@ module.exports = {
   deleteLandingPageSetting,
   getContactSettings,
   updateContactSetting,
+  getAutoLockDeadlineSetting,
+  updateAutoLockDeadlineSetting,
+  getEmailServiceSettings,
+  updateEmailServiceSettings,
 };

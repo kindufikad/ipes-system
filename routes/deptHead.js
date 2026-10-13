@@ -6,7 +6,9 @@ const { getDeptHeadEvaluationTracking, getDeptHeadPendingEvaluators, sendDeptHea
 const { getInstructorOverallPerformance, calculateWeightedPerformance } = require('../services/evaluationMetrics');
 const { calculateAndSaveInstructorResult, getInstructorRoleStatus } = require('../utils/evaluationCalculator');
 const { computeEvaluation } = require('../utils/calculateEvaluationScores');
+const { getLabAssistantPerformance } = require('../controllers/labAssistantPerformanceController');
 const { getDeptHeadAiInsights } = require('../controllers/aiInsightsController');
+const { getDepartmentEvaluationDeadline } = require('../services/evaluationDeadlineService');
 
 const router = express.Router();
 
@@ -271,20 +273,14 @@ router.get('/evaluation-deadline', authenticateToken, authorizeRoles('dept_head'
   const departmentId = getDepartmentId(req);
   if (!departmentId) return res.status(403).json({ message: 'Your department is not defined.' });
   try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_deadline_settings (department_id INT UNSIGNED PRIMARY KEY, deadline_at DATETIME NULL, auto_lock TINYINT(1) NOT NULL DEFAULT 1, updated_by INT UNSIGNED NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)`);
-    const [[settings]] = await pool.query('SELECT department_id, deadline_at, auto_lock, updated_at FROM evaluation_deadline_settings WHERE department_id = ?', [departmentId]);
-    let dispatch = null;
-    if (!settings?.deadline_at) {
-      [[dispatch]] = await pool.query(`
-      SELECT deadline FROM evaluation_dispatches
-      WHERE department_id = ? AND deadline IS NOT NULL
-        AND LOWER(COALESCE(status, 'pending')) IN ('pending', 'active', 'published')
-      ORDER BY id DESC LIMIT 1`, [departmentId]);
+    const deadline = await getDepartmentEvaluationDeadline(pool, departmentId);
+    if (!deadline?.deadlineAt) {
+      return res.status(200).json({ success: true, deadline: null, message: 'No active deadline configured' });
     }
     return res.json({
-      deadlineAt: settings?.deadline_at || dispatch?.deadline || null,
-      autoLock: settings ? settings.auto_lock !== 0 : true,
-      updatedAt: settings?.updated_at || null,
+      success: true,
+      deadline: deadline.deadlineAt,
+      ...deadline,
     });
   } catch (error) {
     console.error('Evaluation deadline settings fetch failed:', error);
@@ -432,12 +428,11 @@ router.post('/publish-peer-evaluation', authenticateToken, authorizeRoles('dept_
     const [peerEvaluators] = staffType !== 'instructor' ? await connection.query(`
       SELECT DISTINCT u.id AS user_id
       FROM users u
-      LEFT JOIN instructors i ON i.user_id = u.id
       LEFT JOIN lab_assistants la ON la.user_id = u.id
       WHERE LOWER(COALESCE(u.status, 'active')) = 'active'
-        AND ((i.department_id = ? AND LOWER(u.role) IN ('instructor', 'dept_head', 'department_head'))
-          OR (la.department_id = ? AND LOWER(u.role) = 'lab_assistant'))
-    `, [departmentId, departmentId]) : [[]];
+        AND la.department_id = ?
+        AND LOWER(TRIM(COALESCE(u.role, ''))) = 'lab_assistant'
+    `, [departmentId]) : [[]];
     for (const labAssistant of labAssistants) {
       for (const peer of peerEvaluators) {
         if (!peer.user_id || peer.user_id === labAssistant.user_id) continue;
@@ -514,19 +509,15 @@ router.post('/publish-lab-assistant-evaluation', authenticateToken, authorizeRol
         AND LOWER(COALESCE(s.user_id, 'active')) <> ''
     `, [departmentId]);
 
-    // Get all department staff (instructors, dept heads) for ARA_PEER_FORM
+    // Only fellow Lab Assistants may evaluate a Lab Assistant.
     const [peerEvaluators] = await connection.query(`
       SELECT DISTINCT u.id AS user_id
       FROM users u
-      LEFT JOIN instructors i ON i.user_id = u.id
-      LEFT JOIN lab_assistants la ON la.user_id = u.id
+      INNER JOIN lab_assistants la ON la.user_id = u.id
       WHERE LOWER(COALESCE(u.status, 'active')) = 'active'
-        AND (
-          (LOWER(u.role) = 'instructor' AND i.department_id = ?)
-          OR (LOWER(u.role) = 'dept_head' AND i.department_id = ?)
-          OR (LOWER(u.role) = 'lab_assistant' AND la.department_id = ?)
-        )
-    `, [departmentId, departmentId, departmentId]);
+        AND LOWER(TRIM(COALESCE(u.role, ''))) = 'lab_assistant'
+        AND la.department_id = ?
+    `, [departmentId]);
 
     const notificationUserIds = new Set();
 
@@ -876,21 +867,115 @@ router.get('/evaluation-tracking-results', authenticateToken, authorizeRoles('de
     if (programType && !/^all/i.test(programType)) { studentFilters.push('LOWER(TRIM(s.program_type)) = LOWER(TRIM(?))'); studentParams.push(programType); }
     const studentFilterSql = studentFilters.length ? ` AND ${studentFilters.join(' AND ')}` : '';
     const instructorFilterId = Number.isInteger(instructorId) && instructorId > 0 ? instructorId : null;
+    if (String(req.query.target_role || '').trim().toLowerCase().replace(/[\s-]+/g, '_') === 'lab_assistant') {
+      const [assistants] = await pool.query(`
+        SELECT la.id AS instructor_id, la.user_id,
+          TRIM(CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, ''))) AS instructor_name
+        FROM lab_assistants la
+        INNER JOIN users u ON u.id = la.user_id
+        WHERE la.department_id = ? AND LOWER(COALESCE(u.status, 'active')) = 'active'
+          AND (? IS NULL OR la.id = ?)
+        ORDER BY instructor_name ASC
+      `, [departmentId, instructorFilterId, instructorFilterId]);
+      const trackingRows = await Promise.all(assistants.map(async (assistant) => {
+        const performance = await getLabAssistantPerformance({
+          staffId: assistant.instructor_id,
+          userId: assistant.user_id,
+          academicYear,
+          semester,
+        });
+        const [[studentTotals]] = await pool.query(`
+          SELECT COUNT(DISTINCT ed.id) AS total,
+            COUNT(DISTINCT CASE WHEN LOWER(COALESCE(ses.status, 'pending')) IN ('submitted', 'completed', 'approved') THEN ed.id END) AS completed
+          FROM evaluation_dispatches ed
+          LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
+          LEFT JOIN students s ON s.id = ed.student_id
+          WHERE ed.department_id = ? AND ed.target_type = 'lab_assistant'
+            AND ed.target_user_id IN (?, ?) AND ed.evaluation_type IN ('student', 'lab_assistant_student')
+            AND (? = '' OR ed.academic_year IS NULL OR ed.academic_year = ? OR ed.academic_year = SUBSTRING_INDEX(?, '/', 1))
+            AND (? = '' OR ed.semester IS NULL OR LOWER(REPLACE(TRIM(ed.semester), 'semester', '')) = LOWER(REPLACE(TRIM(?), 'semester', '')))
+            ${studentFilterSql}
+        `, [departmentId, assistant.instructor_id, assistant.user_id, academicYear, academicYear, academicYear, semester, semester, ...studentParams]);
+        const [[peerTotals]] = await pool.query(`
+          SELECT COUNT(DISTINCT pe.id) AS total
+          FROM peer_evaluations pe
+          LEFT JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+          LEFT JOIN instructors evaluator ON evaluator.id = pe.evaluator_id
+          WHERE (pe.evaluatee_id IN (?, ?) OR (ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)))
+            AND (evaluator.department_id = ? OR evaluator.department_id IS NULL)
+            AND (ed.id IS NULL OR (? = '' OR ed.academic_year IS NULL OR ed.academic_year = ? OR ed.academic_year = SUBSTRING_INDEX(?, '/', 1)))
+            AND (ed.id IS NULL OR (? = '' OR ed.semester IS NULL OR LOWER(REPLACE(TRIM(ed.semester), 'semester', '')) = LOWER(REPLACE(TRIM(?), 'semester', ''))))
+        `, [assistant.instructor_id, assistant.user_id, assistant.instructor_id, assistant.user_id, departmentId, academicYear, academicYear, academicYear, semester, semester]);
+        const studentTotal = Number(studentTotals?.total || 0);
+        const studentCompleted = Number(studentTotals?.completed || 0);
+        const peerTotal = Number(peerTotals?.total || 0);
+        const deptHeadCompleted = performance.deptHeadSubmissionCount > 0 ? 1 : 0;
+        const total = studentTotal + peerTotal + 1;
+        const completed = Math.min(studentCompleted, studentTotal) + Math.min(performance.peerSubmissionCount, peerTotal) + deptHeadCompleted;
+        return {
+          instructor_id: assistant.instructor_id,
+          instructor_name: assistant.instructor_name,
+          role: 'Lab Assistant',
+          student_average: performance.studentScore,
+          peer_average: performance.peerScore,
+          dept_head_average: performance.deptHeadScore,
+          submission_count: performance.studentSubmissionCount,
+          student_completed: performance.studentSubmissionCount,
+          student_required: performance.studentRequiredCount,
+          required_student_evaluators: performance.studentRequiredCount,
+          peer_completed: performance.peerSubmissionCount,
+          dept_head_completed: performance.deptHeadSubmissionCount,
+          dept_head_required: 1,
+          student_weighted: performance.studentWeighted,
+          dept_head_weighted: performance.deptHeadWeighted,
+          peer_weighted: performance.peerWeighted,
+          hasAssignedCourse: performance.hasAssignedCourses,
+          has_assigned_course: performance.hasAssignedCourses,
+          has_assigned_courses: performance.hasAssignedCourses,
+          weights: performance.weights,
+          breakdown: performance.breakdown,
+          total_evaluations: total,
+          completed_evaluations: completed,
+          final_score: performance.totalScore,
+          isComplete: performance.isComplete,
+          can_print: performance.isComplete,
+          student_complete: performance.isStudentComplete,
+          peer_complete: performance.isPeerComplete,
+          dept_head_complete: performance.isDeptHeadComplete,
+          completion: {
+            isStudentComplete: performance.isStudentComplete,
+            isPeerComplete: performance.isPeerComplete,
+            isDeptHeadComplete: performance.isDeptHeadComplete,
+            studentCompletedCount: performance.studentSubmissionCount,
+            requiredStudentCount: performance.studentRequiredCount,
+            incomingPeerCount: performance.peerSubmissionCount,
+            deptHeadCompletedCount: performance.deptHeadSubmissionCount,
+          },
+          completion_rate: total ? Number((completed / total * 100).toFixed(2)) : 0,
+          status: performance.isComplete ? 'Completed' : 'Pending',
+        };
+      }));
+      return res.json(trackingRows);
+    }
     const [rows] = await pool.query(`
       SELECT i.id AS instructor_id, TRIM(CONCAT(i.first_name, ' ', i.last_name)) AS instructor_name,
         COALESCE(st.student_average, 0) AS student_average, COALESCE(pe.peer_average, 0) AS peer_average, COALESCE(dh.dept_head_average, 0) AS dept_head_average,
         COALESCE(st.submission_count, 0) AS submission_count,
+        COALESCE(st.student_total, 0) AS student_required,
+        COALESCE(st.student_completed, 0) AS student_completed,
+        COALESCE(pe.peer_total, 0) AS peer_required,
+        COALESCE(pe.peer_completed, 0) AS peer_completed,
+        COALESCE(dh.dept_head_completed, 0) AS dept_head_completed,
         COALESCE(st.student_total, 0) + COALESCE(pe.peer_total, 0) + COALESCE(dh.dept_head_total, 0) AS total_evaluations,
         COALESCE(st.student_completed, 0) + COALESCE(pe.peer_completed, 0) + COALESCE(dh.dept_head_completed, 0) AS completed_evaluations
       FROM instructors i INNER JOIN users u ON u.id = i.user_id
       LEFT JOIN (
         SELECT ca.instructor_id, AVG(ses.score) AS student_average, COUNT(DISTINCT ses.id) AS submission_count, COUNT(DISTINCT ed.id) AS student_total,
-          COUNT(DISTINCT CASE WHEN LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved') THEN ed.id END) AS student_completed
+          COUNT(DISTINCT CASE WHEN ses.id IS NOT NULL AND LOWER(COALESCE(ses.status, 'pending')) IN ('submitted', 'completed', 'approved') THEN ed.id END) AS student_completed
         FROM evaluation_dispatches ed INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
         INNER JOIN students s ON s.id = ed.student_id INNER JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
         WHERE LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
           AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'${studentFilterSql}
-          AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
           AND (? = '' OR COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), '')) IS NULL
             OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) = LOWER(?)
             OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
@@ -940,8 +1025,42 @@ router.get('/evaluation-tracking-results', authenticateToken, authorizeRoles('de
       const completed = Number(row.completed_evaluations || 0);
       const assignmentCount = assignmentCounts.get(Number(row.instructor_id)) || 0;
       const hasAssignedCourse = assignmentCount > 0;
+      const studentRequired = Number(row.student_required || 0);
+      const studentCompleted = Number(row.student_completed || 0);
+      const peerCompleted = Number(row.peer_completed || 0);
+      const deptHeadCompleted = Number(row.dept_head_completed || 0);
+      const isStudentComplete = !hasAssignedCourse
+        || (studentRequired > 0 && studentCompleted >= Math.ceil(studentRequired / 2));
+      const isPeerComplete = peerCompleted >= 1;
+      const isDeptHeadComplete = deptHeadCompleted > 0;
+      const isComplete = isStudentComplete && isPeerComplete && isDeptHeadComplete;
       const weighted = calculateWeightedPerformance({ student, peer: normalizedPeer, deptHead: normalizedDeptHead, hasAssignedCourse });
-      return { ...row, student_average: Number(student.toFixed(2)), raw_student_score: Number(student.toFixed(2)), submission_count: Number(row.submission_count || 0), student_weighted: weighted.studentWeighted, hasAssignedCourse, has_assigned_course: hasAssignedCourse, peer_average: Number(normalizedPeer.toFixed(2)), dept_head_average: Number(normalizedDeptHead.toFixed(2)), final_score: weighted.totalWeightedScore, total_evaluations: total, completed_evaluations: completed, completion_rate: total ? Number((completed / total * 100).toFixed(2)) : 0, status: total > 0 && completed === total ? 'Completed' : 'Pending' };
+      return {
+        ...row,
+        student_average: Number(student.toFixed(2)),
+        raw_student_score: Number(student.toFixed(2)),
+        submission_count: Number(row.submission_count || 0),
+        student_completed: studentCompleted,
+        student_required: studentRequired,
+        student_complete: isStudentComplete,
+        student_weighted: weighted.studentWeighted,
+        hasAssignedCourse,
+        has_assigned_course: hasAssignedCourse,
+        peer_average: Number(normalizedPeer.toFixed(2)),
+        peer_completed: peerCompleted,
+        peer_required: Number(row.peer_required || 0),
+        peer_complete: isPeerComplete,
+        dept_head_completed: deptHeadCompleted,
+        dept_head_complete: isDeptHeadComplete,
+        final_score: isComplete ? weighted.totalWeightedScore : null,
+        isComplete,
+        can_print: isComplete,
+        completion: { isStudentComplete, isPeerComplete, isDeptHeadComplete },
+        total_evaluations: total,
+        completed_evaluations: completed,
+        completion_rate: total ? Number((completed / total * 100).toFixed(2)) : 0,
+        status: isComplete ? 'Completed' : 'Pending',
+      };
     }));
   } catch (error) {
     console.error('Department evaluation tracking query failed:', error);
@@ -981,83 +1100,79 @@ router.get('/department-summary', authenticateToken, authorizeRoles('dept_head',
     const rows = [];
     for (const instructor of instructors) {
       if (instructor.role === 'Lab Assistant') {
-        const [[student]] = await pool.query(
-          `SELECT COALESCE(AVG(ses.score), 0) AS score
-           FROM student_evaluation_submissions ses
-           INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-           WHERE ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
-             AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')` ,
-           [instructor.instructor_id, instructor.user_id]
-        );
-        const [[peer]] = await pool.query(
-          `SELECT COALESCE(AVG(pes.score), 0) AS score
-           FROM peer_evaluation_submissions pes
-           INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-           INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
-           WHERE ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
-             AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')` ,
-           [instructor.instructor_id, instructor.user_id]
-        );
-        const [[deptHead]] = await pool.query(
-          `SELECT COALESCE(AVG(dhe.total_score), 0) AS score
-           FROM dept_head_evaluations dhe
-           WHERE dhe.evaluatee_id IN (?, ?) AND LOWER(COALESCE(dhe.target_role, '')) = 'lab_assistant'
-             AND LOWER(COALESCE(dhe.status, 'pending')) IN ('submitted', 'completed', 'approved')` ,
-           [instructor.instructor_id, instructor.user_id]
-        );
-        const studentScore = Number(student?.score || 0);
-        const peerScore = Number(peer?.score || 0);
-        const deptHeadStored = Number(deptHead?.score || 0);
-        const deptHeadScore = deptHeadStored;
-        const evaluated = computeEvaluation(studentScore, deptHeadScore, peerScore);
+        const evaluated = await getLabAssistantPerformance({
+          staffId: instructor.instructor_id,
+          userId: instructor.user_id,
+          academicYear,
+          semester,
+        });
         rows.push({
           ...instructor,
-          student_average: Number(studentScore.toFixed(2)),
+          academic_year: evaluated.academicYear,
+          semester: evaluated.semester,
+          student_average: evaluated.studentScore,
+          student_score: evaluated.studentScore,
+          studentRaw: evaluated.studentScore,
           student_weighted: evaluated.studentWeighted,
-          dept_head_score: Number(evaluated.deptHeadRaw.toFixed(2)),
-          dept_head_average: Number(evaluated.deptHeadRaw.toFixed(2)),
+          dept_head_score: evaluated.deptHeadScore,
+          dept_head_raw_score: evaluated.deptHeadStoredScore,
+          dept_head_average: evaluated.deptHeadScore,
           dept_head_weighted: evaluated.deptHeadWeighted,
-          peer_average: Number(peerScore.toFixed(2)),
+          peer_average: evaluated.peerScore,
+          peer_score: evaluated.peerScore,
           peer_weighted: evaluated.peerWeighted,
           total_score: evaluated.totalScore,
           final_score: evaluated.totalScore,
           totalWeightedScore: evaluated.totalScore,
-          status: evaluated.totalScore > 0 ? 'Completed' : 'Pending',
-          can_print: evaluated.totalScore > 0,
+          has_assigned_courses: evaluated.hasAssignedCourses,
+          hasCourseAssigned: evaluated.hasAssignedCourses,
+          hasAssignedCourses: evaluated.hasAssignedCourses,
+          weights: evaluated.weights,
+          breakdown: evaluated.breakdown,
+          completion: {
+            isStudentComplete: evaluated.isStudentComplete,
+            isPeerComplete: evaluated.isPeerComplete,
+            isDeptHeadComplete: evaluated.isDeptHeadComplete,
+            studentCompletedCount: evaluated.studentSubmissionCount,
+            requiredStudentCount: evaluated.studentRequiredCount,
+            incomingPeerCount: evaluated.peerSubmissionCount,
+            deptHeadCompletedCount: evaluated.deptHeadSubmissionCount,
+          },
+          student_completed: evaluated.studentSubmissionCount,
+          student_required: evaluated.studentRequiredCount,
+          peer_completed: evaluated.peerSubmissionCount,
+          dept_head_completed: evaluated.deptHeadSubmissionCount,
+          dept_head_required: 1,
+          isComplete: evaluated.isComplete,
+          status: evaluated.isComplete ? 'Completed' : 'Pending',
+          can_print: evaluated.isComplete,
         });
         continue;
       }
       await calculateAndSaveInstructorResult(instructor.instructor_id, academicYear, semester);
-      const [[result]] = await pool.query(
-        `SELECT instructor_id, academic_year, semester,
-                student_average, student_score, peer_average, peer_score,
-                dept_head_score, total_score, final_score
-         FROM evaluation_results
-         WHERE instructor_id = ?
-           AND (? = '' OR academic_year = ?)
-           AND (? = '' OR semester = ?)
-         ORDER BY id DESC LIMIT 1`,
-        [instructor.instructor_id, academicYear, academicYear, semester, semester]
-      );
-      const student = Number(result?.student_average || result?.student_score || 0);
-      const peer = Number(result?.peer_average || result?.peer_score || 0);
-      const deptHeadRaw = Number(result?.dept_head_score || 0);
-      const deptHead = deptHeadRaw > 0 && deptHeadRaw <= 30 ? (deptHeadRaw / 30) * 100 : deptHeadRaw;
-      const evaluated = computeEvaluation(student, deptHeadRaw, peer);
+      const metrics = await getInstructorOverallPerformance({
+        instructorId: instructor.instructor_id,
+        academicYear,
+        semester,
+      });
       rows.push({
         ...instructor,
-        student_average: Number(student.toFixed(2)),
-        student_weighted: evaluated.studentWeighted,
-        dept_head_score: Number(evaluated.deptHeadRaw.toFixed(2)),
-        dept_head_average: Number(evaluated.deptHeadRaw.toFixed(2)),
-        dept_head_weighted: evaluated.deptHeadWeighted,
-        peer_average: Number(peer.toFixed(2)),
-        peer_weighted: evaluated.peerWeighted,
-        total_score: evaluated.totalScore,
-        final_score: evaluated.totalScore,
-        totalWeightedScore: evaluated.totalScore,
-        status: evaluated.totalScore > 0 ? 'Completed' : 'Pending',
-        can_print: evaluated.totalScore > 0,
+        ...metrics,
+        student_average: metrics.studentRaw,
+        peer_average: metrics.peerRaw,
+        dept_head_average: metrics.deptHeadRaw,
+        total_score: metrics.totalScore,
+        final_score: metrics.totalScore,
+        totalWeightedScore: metrics.totalScore,
+        student_completed: metrics.student.count,
+        student_required: metrics.student.requiredCount,
+        peer_completed: metrics.peer.count,
+        dept_head_completed: metrics.deptHead.count,
+        hasCourseAssigned: metrics.hasAssignedCourse,
+        completion: metrics.completion,
+        status: metrics.isComplete ? 'Completed' : 'Pending',
+        isComplete: metrics.isComplete,
+        can_print: metrics.isComplete,
       });
     }
     return res.json({ success: true, data: rows });
@@ -1090,12 +1205,6 @@ router.get(['/reports', '/department-report'], authenticateToken, authorizeRoles
   }
 
   try {
-    const [[activePeriod]] = await pool.query(
-      `SELECT academic_year, semester FROM evaluation_periods
-       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
-    );
-    academicYear = academicYear || String(activePeriod?.academic_year || '').trim();
-    semester = semester || String(activePeriod?.semester || '').trim();
     const [instructors] = await pool.query(`
       SELECT i.id, i.user_id,
         TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))) AS name,
@@ -1134,7 +1243,9 @@ router.get(['/reports', '/department-report'], authenticateToken, authorizeRoles
       const studentWeighted = Number((studentRaw * (hasCourseAssigned ? 0.50 : 0)).toFixed(2));
       const deptHeadWeighted = Number((deptHeadRaw * (hasCourseAssigned ? 0.30 : 0.60)).toFixed(2));
       const peerWeighted = Number((peerRaw * (hasCourseAssigned ? 0.20 : 0.40)).toFixed(2));
-      const totalScore = Number((studentWeighted + deptHeadWeighted + peerWeighted).toFixed(2));
+      const totalScore = metrics.isComplete
+        ? Number((studentWeighted + deptHeadWeighted + peerWeighted).toFixed(2))
+        : null;
       return {
         ...metrics,
         id: instructor.id,
@@ -1175,53 +1286,25 @@ router.get(['/reports', '/department-report'], authenticateToken, authorizeRoles
         hasAssignedCourses: hasCourseAssigned,
         has_course_assigned: hasCourseAssigned,
         total_students_evaluated_count: Number(metrics.student?.count || 0),
+        student_completed: Number(metrics.student?.count || 0),
+        student_required: Number(metrics.student?.requiredCount || 0),
+        required_student_evaluators: Number(metrics.student?.requiredCount || 0),
         total_peers_evaluated_count: Number(metrics.peer?.count || 0),
+        peer_completed: Number(metrics.peer?.count || 0),
+        peer_required: Number(metrics.peer?.requiredCount || 0),
+        required_peer_evaluators: Number(metrics.peer?.requiredCount || 0),
         can_print: metrics.isComplete === true,
         isComplete: metrics.isComplete === true,
         status: metrics.isComplete === true ? 'Completed' : 'Pending',
       };
     }));
     const labAssistantRows = await Promise.all(labAssistants.map(async (labAssistant) => {
-      const [[courseCountRow]] = await pool.query(
-        'SELECT COUNT(*) AS total FROM course_assignments WHERE lab_assistant_id = ? OR instructor_id = ?',
-        [labAssistant.id, labAssistant.id]
-      );
-      const hasCourseAssigned = Number(courseCountRow?.total || 0) > 0;
-      const [[student]] = await pool.query(
-        `SELECT COALESCE(AVG(ses.score), 0) AS score, COUNT(DISTINCT ses.id) AS submission_count
-         FROM student_evaluation_submissions ses
-         INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-         WHERE ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
-            AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')` ,
-          [labAssistant.id, labAssistant.user_id]
-      );
-      const [[peer]] = await pool.query(
-        `SELECT COALESCE(AVG(pes.score), 0) AS score, COUNT(DISTINCT pes.id) AS submission_count
-         FROM peer_evaluation_submissions pes
-         INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-         LEFT JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
-        WHERE (pe.evaluatee_id IN (?, ?) OR (ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)))
-            AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')` ,
-          [labAssistant.id, labAssistant.user_id, labAssistant.id, labAssistant.user_id]
-      );
-      const [[deptHead]] = await pool.query(
-        `SELECT COALESCE(AVG(dhe.total_score), 0) AS score
-         FROM dept_head_evaluations dhe
-         WHERE dhe.evaluatee_id IN (?, ?) AND LOWER(COALESCE(dhe.target_role, '')) = 'lab_assistant'
-            AND LOWER(COALESCE(dhe.status, 'pending')) IN ('submitted', 'completed', 'approved')` ,
-          [labAssistant.id, labAssistant.user_id]
-      );
-      const studentRaw = Number(Number(student?.score || 0).toFixed(2));
-      const peerRaw = Number(Number(peer?.score || 0).toFixed(2));
-      const deptHeadStored = Number(deptHead?.score || 0);
-      const deptHeadRaw = Number(deptHeadStored.toFixed(2));
-      const studentWeighted = Number((studentRaw * (hasCourseAssigned ? 0.50 : 0)).toFixed(2));
-      const peerWeighted = Number((peerRaw * (hasCourseAssigned ? 0.20 : 0.40)).toFixed(2));
-      const deptHeadWeighted = Number((deptHeadRaw * (hasCourseAssigned ? 0.30 : 0.60)).toFixed(2));
-      const totalScore = Number((studentWeighted + peerWeighted + deptHeadWeighted).toFixed(2));
-      const isComplete = hasCourseAssigned
-        ? studentRaw > 0 && peerRaw > 0 && deptHeadRaw > 0
-        : peerRaw > 0 && deptHeadRaw > 0;
+      const evaluated = await getLabAssistantPerformance({
+        staffId: labAssistant.id,
+        userId: labAssistant.user_id,
+        academicYear,
+        semester,
+      });
       return {
         id: labAssistant.id,
         evaluatee_id: labAssistant.id,
@@ -1234,31 +1317,54 @@ router.get(['/reports', '/department-report'], authenticateToken, authorizeRoles
         department_name: labAssistant.department_name,
         college_name: labAssistant.college_name,
         employee_id: labAssistant.employee_id,
-        student_average: studentRaw,
-        student_score: studentRaw,
-        studentRaw,
-        student_weighted: studentWeighted,
-        studentWeighted,
-        peer_average: peerRaw,
-        peer_score: peerRaw,
-        peerRaw,
-        peer_weighted: peerWeighted,
-        peerWeighted,
-        dept_head_score: deptHeadRaw,
-        dept_head_average: deptHeadRaw,
-        deptHeadRaw: deptHeadRaw,
-        dept_head_weighted: deptHeadWeighted,
-        deptHeadWeighted,
-        total_score: totalScore,
-        final_score: totalScore,
-        totalWeightedScore: totalScore,
-        total_students_evaluated_count: Number(student?.submission_count || 0),
-        total_peers_evaluated_count: Number(peer?.submission_count || 0),
-        hasCourseAssigned,
-        has_course_assigned: hasCourseAssigned,
-        can_print: isComplete,
-        isComplete,
-        status: isComplete ? 'Completed' : 'Pending',
+        academic_year: evaluated.academicYear,
+        semester: evaluated.semester,
+        student_average: evaluated.studentScore,
+        student_score: evaluated.studentScore,
+        studentRaw: evaluated.studentScore,
+        student_weighted: evaluated.studentWeighted,
+        studentWeighted: evaluated.studentWeighted,
+        peer_average: evaluated.peerScore,
+        peer_score: evaluated.peerScore,
+        peerRaw: evaluated.peerScore,
+        peer_weighted: evaluated.peerWeighted,
+        peerWeighted: evaluated.peerWeighted,
+        dept_head_score: evaluated.deptHeadScore,
+        dept_head_raw_score: evaluated.deptHeadStoredScore,
+        dept_head_average: evaluated.deptHeadScore,
+        deptHeadRaw: evaluated.deptHeadScore,
+        dept_head_weighted: evaluated.deptHeadWeighted,
+        deptHeadWeighted: evaluated.deptHeadWeighted,
+        total_score: evaluated.totalScore,
+        final_score: evaluated.totalScore,
+        totalWeightedScore: evaluated.totalScore,
+        total_students_evaluated_count: evaluated.studentSubmissionCount,
+        student_completed: evaluated.studentSubmissionCount,
+        student_required: evaluated.studentRequiredCount,
+        required_student_evaluators: evaluated.studentRequiredCount,
+        total_peers_evaluated_count: evaluated.peerSubmissionCount,
+        peer_completed: evaluated.peerSubmissionCount,
+        total_dept_head_evaluators: evaluated.deptHeadSubmissionCount,
+        dept_head_completed: evaluated.deptHeadSubmissionCount,
+        dept_head_required: 1,
+        completion: {
+          isStudentComplete: evaluated.isStudentComplete,
+          isPeerComplete: evaluated.isPeerComplete,
+          isDeptHeadComplete: evaluated.isDeptHeadComplete,
+          studentCompletedCount: evaluated.studentSubmissionCount,
+          requiredStudentCount: evaluated.studentRequiredCount,
+          incomingPeerCount: evaluated.peerSubmissionCount,
+          deptHeadCompletedCount: evaluated.deptHeadSubmissionCount,
+        },
+        hasCourseAssigned: evaluated.hasAssignedCourses,
+        hasAssignedCourses: evaluated.hasAssignedCourses,
+        has_assigned_courses: evaluated.hasAssignedCourses,
+        has_course_assigned: evaluated.hasAssignedCourses,
+        weights: evaluated.weights,
+        breakdown: evaluated.breakdown,
+        can_print: evaluated.isComplete,
+        isComplete: evaluated.isComplete,
+        status: evaluated.isComplete ? 'Completed' : 'Pending',
       };
     }));
     return res.json([...unifiedRows, ...labAssistantRows].sort((left, right) => String(left.name || '').localeCompare(String(right.name || ''))));
