@@ -189,7 +189,7 @@ const handleCheckStatus = async (ctx) => {
   if (user.role === 'student') {
     const pendingRows = status.rows.filter((row) => row.status === 'Pending').slice(0, 8);
     const pendingText = pendingRows.length
-      ? `\n${t(language, 'pending')}\n${pendingRows.map((row) => `• ${row.course_name || row.course_code || 'Course'}${row.instructor_name ? ` - ${row.instructor_name}` : ''}`).join('\n')}`
+      ? `\n${t(language, 'pending')}\n${pendingRows.map((row) => `- ${row.course_code || row.courseCode || 'N/A'} - ${row.course_name || row.courseName || 'Course'} - ${row.instructor_name || row.instructorName || 'N/A'}`).join('\n')}`
       : `\n${t(language, 'noPending')}`;
     try {
       await ctx.reply(`${t(language, 'statusSummary', status)}${pendingText}`, buildLinkedKeyboard(language));
@@ -478,8 +478,10 @@ const createBot = () => {
       return ctx.reply(language === 'en' ? `This message was routed under topic: ${route || 'general'}` : `ይህ መልዕክት በርዕስ ተመድቧል፦ ${route || 'አጠቃላይ'}`);
     }
     const text = rawText.trim();
-    if (text === t(language, 'statusButton')) return handleCheckStatus(ctx);
-    if (text === t(language, 'profileButton')) return handleMyProfile(ctx);
+    const statusButtonLabels = ['📊 ሁኔታ ይመልከቱ', '📊 Check Status', t(language, 'statusButton')];
+    const profileButtonLabels = ['👤 የእኔ መገልጫ', '👤 የእኔ መገለጫ', '👤 My Profile', t(language, 'profileButton')];
+    if (statusButtonLabels.includes(text)) return handleCheckStatus(ctx);
+    if (profileButtonLabels.includes(text)) return handleMyProfile(ctx);
     if (/^(?:📊\s*)?check status$/i.test(text)) return handleCheckStatus(ctx);
     if (/^(?:👤\s*)?my profile$/i.test(text)) return handleMyProfile(ctx);
     if (text.toLowerCase() === 'login' || text === MESSAGES.am.login) return promptLogin(ctx);
