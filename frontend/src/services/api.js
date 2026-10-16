@@ -1,6 +1,7 @@
 import axios from 'axios';
 
-const API_BASE_URL = '/api';
+// Get API base URL from Vite environment variables or fallback to the Render backend
+const API_BASE_URL = (import.meta.env.VITE_API_URL || import.meta.env.REACT_APP_API_URL || 'https://ipes-system.onrender.com') + '/api';
 
 axios.interceptors.request.use((config) => {
   if (typeof window === 'undefined') return config;
@@ -247,7 +248,6 @@ export const registrationApi = {
 };
 
 export const studentApi = {
-  // hits /api/students
   bulkUpload: (payload) => request('/students/bulk-upload', { method: 'POST', data: payload }),
   getFiltered: (filters = {}) => request('/students', { method: 'GET', params: filters }),
   getProfile: () => request('/student/profile', { method: 'GET' }),
