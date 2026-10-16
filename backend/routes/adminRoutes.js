@@ -47,6 +47,8 @@ router.post('/profile/email-verification', authenticateToken, authorizeRoles('ad
 router.put('/profile', authenticateToken, authorizeRoles('admin', 'systemadmin'), updateAdminProfile);
 router.get('/email-service-settings', authenticateToken, authorizeRoles('admin', 'systemadmin'), getEmailServiceSettings);
 router.put('/email-service-settings', authenticateToken, authorizeRoles('admin', 'systemadmin'), updateEmailServiceSettings);
+router.get('/smtp-settings', authenticateToken, authorizeRoles('admin', 'systemadmin', 'system_admin'), getEmailServiceSettings);
+router.post('/smtp-settings', authenticateToken, authorizeRoles('admin', 'systemadmin', 'system_admin'), updateEmailServiceSettings);
 router.get('/evaluation-auto-lock', authenticateToken, authorizeRoles('admin', 'systemadmin'), getAutoLockDeadlineSetting);
 router.post('/evaluation-auto-lock', authenticateToken, authorizeRoles('admin', 'systemadmin'), updateAutoLockDeadlineSetting);
 router.put('/evaluation-auto-lock', authenticateToken, authorizeRoles('admin', 'systemadmin'), updateAutoLockDeadlineSetting);

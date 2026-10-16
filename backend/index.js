@@ -1002,6 +1002,17 @@ const initializeSchema = async () => {
     ADD COLUMN IF NOT EXISTS http_method VARCHAR(12) DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS status_code SMALLINT UNSIGNED DEFAULT NULL`);
 
+  await pool.query(`CREATE TABLE IF NOT EXISTS admin_email_verifications (
+    user_id INT UNSIGNED PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    code_hash VARCHAR(255) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_admin_email_verifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_admin_email_verifications_expiry (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
   await pool.query(`CREATE TABLE IF NOT EXISTS system_settings (
     setting_key VARCHAR(128) PRIMARY KEY,
     setting_value TEXT NULL,

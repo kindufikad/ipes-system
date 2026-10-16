@@ -9,6 +9,7 @@ import { ThemeContext } from '../context/ThemeContextValue';
 import { adminApi, authApi, evaluationApi } from '../services/api';
 import LanguageSwitcher from './LanguageSwitcher';
 import NotificationBell from './NotificationBell';
+import AdminSettingsModal from './admin/AdminSettingsModal';
 
 const dashboardRoutes = {
   systemadmin: '/admin/dashboard',
@@ -75,14 +76,12 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
   const [isOpen, setIsOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAdminSettingsModalOpen, setIsAdminSettingsModalOpen] = useState(false);
   const [isSubmittingPassword, setIsSubmittingPassword] = useState(false);
   const [deadlineSettings, setDeadlineSettings] = useState({ deadlineAt: '', autoLock: true });
   const [savedDeadlineAt, setSavedDeadlineAt] = useState('');
   const [deadlineSaving, setDeadlineSaving] = useState(false);
   const [autoLockSettingLoading, setAutoLockSettingLoading] = useState(false);
-  const [smtpSettings, setSmtpSettings] = useState({ senderEmail: '', appPassword: '', host: 'smtp.gmail.com', port: 587, appPasswordConfigured: false });
-  const [smtpSettingsLoading, setSmtpSettingsLoading] = useState(false);
-  const [smtpSettingsSaving, setSmtpSettingsSaving] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
   const [settingsState, setSettingsState] = useState(() => {
     try {
@@ -260,57 +259,11 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
     return () => { active = false; };
   }, [isSettingsOpen, isSystemAdmin]);
 
-  useEffect(() => {
-    if (!isSettingsOpen || !isSystemAdmin) return undefined;
-    let active = true;
-    setSmtpSettingsLoading(true);
-    adminApi.getEmailServiceSettings()
-      .then((settings) => {
-        if (active) setSmtpSettings({
-          senderEmail: settings?.senderEmail || '',
-          appPassword: '',
-          host: settings?.host || 'smtp.gmail.com',
-          port: Number(settings?.port || 587),
-          appPasswordConfigured: settings?.appPasswordConfigured === true,
-        });
-      })
-      .catch((error) => {
-        if (active) toast.error(error?.message || 'Unable to load Email Service Settings.');
-      })
-      .finally(() => {
-        if (active) setSmtpSettingsLoading(false);
-      });
-    return () => { active = false; };
-  }, [isSettingsOpen, isSystemAdmin]);
-
-  const saveSmtpSettings = async () => {
-    setSmtpSettingsSaving(true);
-    try {
-      const saved = await adminApi.updateEmailServiceSettings(smtpSettings);
-      setSmtpSettings((current) => ({
-        ...current,
-        ...saved,
-        appPassword: '',
-        appPasswordConfigured: saved?.appPasswordConfigured === true,
-      }));
-      toast.success('Email Service Settings saved securely.');
-    } catch (error) {
-      toast.error(error?.message || 'Unable to save Email Service Settings.');
-    } finally {
-      setSmtpSettingsSaving(false);
-    }
-  };
-
   const handleLogout = async () => {
     setIsOpen(false);
     setIsMobileMenuOpen(false);
-    if (typeof window !== 'undefined') {
-      const themePreferences = Object.keys(window.localStorage)
-        .filter((key) => key.startsWith('ipes-theme-preference:'))
-        .map((key) => [key, window.localStorage.getItem(key)]);
-      window.localStorage.clear();
-      themePreferences.forEach(([key, value]) => window.localStorage.setItem(key, value));
-    }
+    setIsAdminSettingsModalOpen(false);
+    setIsSettingsOpen(false);
     await logout();
   };
 
@@ -599,7 +552,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
                 <nav className="p-2" aria-label={t('header.accountMenuAria')}>
                   <button type="button" onClick={() => navigateAndClose('/profile')} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><UserRound className="h-4 w-4" /> {t('header.viewProfile')}</button>
                   {!isSystemAdmin && <button type="button" onClick={() => { setIsOpen(false); setIsMobileMenuOpen(false); setIsChangePasswordOpen(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><KeyRound className="h-4 w-4" /> {t('header.changePassword')}</button>}
-                  <button type="button" onClick={() => { setIsOpen(false); setIsMobileMenuOpen(false); setIsSettingsOpen(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><Settings className="h-4 w-4" /> {t('header.dashboardSettings')}</button>
+                  <button type="button" onClick={() => { setIsOpen(false); setIsMobileMenuOpen(false); if (isSystemAdmin) setIsAdminSettingsModalOpen(true); else setIsSettingsOpen(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><Settings className="h-4 w-4" /> {t('header.dashboardSettings')}</button>
                   <button type="button" onClick={handleLogout} className="mt-1 flex w-full items-center gap-3 border-t border-slate-100 px-3 py-2.5 text-left text-sm text-red-600 hover:bg-red-50 dark:border-slate-700 dark:hover:bg-red-950/40"><LogOut className="h-4 w-4" /> {t('header.signOut')}</button>
                 </nav>
               </div>
@@ -611,6 +564,8 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
         </button>}
       </div>
     </header>
+
+    {isAdminSettingsModalOpen && isSystemAdmin && <AdminSettingsModal isOpen={isAdminSettingsModalOpen} onClose={() => setIsAdminSettingsModalOpen(false)} />}
 
     {isChangePasswordOpen && (
       <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 p-4">
@@ -708,31 +663,6 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
                 </label>
               </div>
             </div>
-
-            {isSystemAdmin && <section className="rounded-xl border border-slate-200 p-4">
-              <div className="mb-4">
-                <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">System Settings</p>
-                <h3 className="mt-1 text-lg font-semibold text-slate-900">Email Service Settings</h3>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="block text-sm font-medium text-slate-700 sm:col-span-2">SMTP Sender Email
-                  <input type="email" autoComplete="email" value={smtpSettings.senderEmail} onChange={(event) => setSmtpSettings((current) => ({ ...current, senderEmail: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
-                </label>
-                <label className="block text-sm font-medium text-slate-700 sm:col-span-2">SMTP App Password
-                  <input type="password" autoComplete="new-password" value={smtpSettings.appPassword} placeholder={smtpSettings.appPasswordConfigured ? 'Saved; enter a new password to replace it' : '16-character Gmail App Password'} onChange={(event) => setSmtpSettings((current) => ({ ...current, appPassword: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
-                  <span className="mt-1 block text-xs text-slate-500">{smtpSettings.appPasswordConfigured ? 'A password is configured and encrypted at rest.' : 'The app password is encrypted before it is stored.'}</span>
-                </label>
-                <label className="block text-sm font-medium text-slate-700">SMTP Host
-                  <input value={smtpSettings.host} onChange={(event) => setSmtpSettings((current) => ({ ...current, host: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
-                </label>
-                <label className="block text-sm font-medium text-slate-700">SMTP Port
-                  <input type="number" min="1" max="65535" step="1" value={smtpSettings.port} onChange={(event) => setSmtpSettings((current) => ({ ...current, port: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
-                </label>
-              </div>
-              <button type="button" onClick={saveSmtpSettings} disabled={smtpSettingsLoading || smtpSettingsSaving || !smtpSettings.senderEmail || !smtpSettings.host || (!smtpSettings.appPasswordConfigured && !smtpSettings.appPassword)} className="mt-4 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
-                {smtpSettingsSaving ? 'Saving...' : 'Save SMTP Settings'}
-              </button>
-            </section>}
 
             {['dept_head', 'depthead', 'department_head'].includes(normalizedRole) && <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4">
               <div><p className="font-semibold text-slate-800">{t('header.evaluationPeriod')}</p><p className="mt-1 text-sm text-slate-500">{t('header.deadlineDescription')}</p><p className="mt-1 text-xs font-medium text-blue-800">{t('header.deadlineAppliesOnly')} {currentUser.department_name || currentUser.department || t('header.yourDepartment')}.</p></div>

@@ -109,6 +109,7 @@ const SystemAdminDashboard = () => {
   const { language, strings } = useContext(LanguageContext);
   const { t: translate } = useTranslation();
   const { role, isAuthenticated, registerUser } = useAuth();
+  const isSystemAdmin = ['admin', 'systemadmin', 'system_admin'].includes(String(role || '').trim().toLowerCase());
   const navigate = useNavigate();
   const sys = strings.systemAdminDashboard;
   const common = strings.common;
@@ -481,10 +482,10 @@ const SystemAdminDashboard = () => {
   const getDepartmentsForCollege = (collegeId) => registeredDepartments.filter((department) => String(department.college_id || department.collegeId) === String(collegeId));
 
   useEffect(() => {
-    if (!isAuthenticated || (role !== 'admin' && role !== 'systemadmin')) {
+    if (!isAuthenticated || !isSystemAdmin) {
       navigate('/login');
     }
-  }, [isAuthenticated, role, navigate]);
+  }, [isAuthenticated, isSystemAdmin, navigate]);
 
   useEffect(() => {
     let isMounted = true;

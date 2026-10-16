@@ -157,6 +157,17 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   INDEX idx_audit_logs_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS admin_email_verifications (
+  user_id INT UNSIGNED PRIMARY KEY,
+  email VARCHAR(255) NOT NULL,
+  code_hash VARCHAR(255) NOT NULL,
+  expires_at DATETIME NOT NULL,
+  attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_admin_email_verifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_admin_email_verifications_expiry (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS evaluation_results (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   instructor_id INT UNSIGNED NOT NULL,
@@ -251,6 +262,10 @@ CREATE TABLE IF NOT EXISTS evaluation_deadline_history (
 
 INSERT INTO system_settings (setting_key, setting_value)
 VALUES ('system_lock_enabled', '0')
+ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key);
+
+INSERT INTO system_settings (setting_key, setting_value)
+VALUES ('SMTP_HOST', 'smtp.gmail.com'), ('SMTP_PORT', '587'), ('SMTP_USER', NULL), ('SMTP_PASS', NULL)
 ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key);
 
 INSERT INTO system_settings (setting_key, setting_value, is_system_locked, lock_reason)

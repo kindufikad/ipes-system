@@ -128,6 +128,8 @@ export const adminApi = {
   updateAutoLockDeadlineSetting: (enabled) => request('/admin/evaluation-auto-lock', { method: 'POST', data: { auto_lock_enabled: enabled } }),
   getEmailServiceSettings: () => request('/admin/email-service-settings'),
   updateEmailServiceSettings: (payload) => request('/admin/email-service-settings', { method: 'PUT', data: payload }),
+  getSmtpSettings: () => request('/admin/smtp-settings'),
+  updateSmtpSettings: (payload) => request('/admin/smtp-settings', { method: 'POST', data: payload }),
   getDashboardStats: () => request('/admin/dashboard-stats'),
   getDepartmentAnalytics: () => request('/admin/department-analytics'),
   getSecurityLogs: (params = {}) => request('/admin/security-logs', { params }),
