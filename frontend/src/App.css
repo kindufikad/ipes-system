@@ -1,0 +1,512 @@
+/* App.css - Custom styles for IEPS */
+
+/* Smooth transitions */
+.fade-enter {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.fade-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 300ms, transform 300ms;
+}
+
+/* Glass effect for cards */
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* Gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, #1a2a6c, #2a4a8a);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Shimmer animation for loading */
+.shimmer {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* Print styles */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  @page { size: A4; margin: 0.5in; }
+  body.printing-college-report #root * { visibility: hidden !important; }
+  body.printing-college-report .college-reports-view,
+  body.printing-college-report .college-reports-view * { visibility: visible !important; }
+  body.printing-college-report .college-reports-view {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    box-sizing: border-box;
+    border: 0;
+    box-shadow: none;
+  }
+
+  .printing-official-report .official-report-shell {
+    display: block !important;
+  }
+}
+
+.official-report-shell {
+  display: none;
+}
+
+.official-report {
+  max-width: 8.27in;
+  margin: 0 auto;
+  padding: 0.45in 0.55in;
+  color: #111827;
+  background: #fff;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 11pt;
+  line-height: 1.5;
+}
+
+.official-report__header { display: grid; grid-template-columns: minmax(0, 1fr) 0.8in minmax(0, 1fr); align-items: center; gap: 0.18in; }
+.official-report__english { text-align: left; }
+.official-report__brand-mark { display: flex; width: 0.8in; height: 0.8in; align-items: center; justify-content: center; justify-self: center; }
+.official-report__brand-mark img { width: 100%; height: 100%; object-fit: contain; }
+.official-report h1 { margin: 0; font-size: 14pt; text-transform: uppercase; }
+.official-report__title { text-align: center; letter-spacing: 0.02em; }
+.official-evaluation-certificate__title { margin: 0.2in 0 0.14in; text-align: center; }
+.official-evaluation-certificate__title p { margin: 0; font-size: 10pt; font-weight: 700; letter-spacing: 0.08em; }
+.official-evaluation-certificate__title h2 { margin: 0.05in 0 0; text-decoration: none; }
+.official-report__header p { margin: 0; }
+.official-report__amharic { text-align: right; font-size: 9pt; }
+.official-report__rule { margin: 0.12in 0 0.08in; border-top: 2px solid #111827; border-bottom: 1px solid #111827; height: 4px; }
+.official-report__meta { display: flex; justify-content: flex-end; gap: 0.25in; font-size: 10pt; white-space: nowrap; }
+.official-report__reference { display: flex; flex-direction: column; align-items: flex-end; gap: 0.04in; margin-top: 0.08in; font-size: 10pt; }
+.official-report__semester { margin-left: 0.18in; }
+.official-report__recipient { margin-top: 0.25in; font-weight: 700; }
+.official-report__subject { margin-top: 0.2in !important; text-decoration: underline; }
+.official-report__details { border: 1px solid #9ca3af; padding: 0.12in 0.16in; }
+.official-report__details p { display: inline-block; width: 49%; margin: 0.03in 0; }
+.official-report h2 { margin: 0.18in 0 0.1in; font-size: 12pt; text-decoration: underline; }
+.official-report p { margin: 0.1in 0; }
+.official-report__table { width: 100%; margin: 0.2in 0; border-collapse: collapse; font-size: 8.5pt; }
+.official-report__table th, .official-report__table td { border: 1px solid #4b5563; padding: 5px 4px; text-align: left; }
+.official-report__table th { background: #f3f4f6; text-align: center; }
+.official-report__table td:nth-child(1), .official-report__table td:nth-child(n+4) { text-align: center; }
+.official-report__total-label { text-align: right !important; font-weight: 700; }
+.official-report__summary { border-top: 1px solid #9ca3af; border-bottom: 1px solid #9ca3af; padding: 0.1in 0; }
+.official-report__signature { display: flex; align-items: flex-end; justify-content: space-between; gap: 0.3in; margin-top: 0.35in; }
+.official-report__signer { position: relative; display: flex; min-width: 2.8in; flex-direction: column; align-items: flex-start; padding-top: 0.55in; font-size: 9pt; }
+.official-report__signature-image { position: absolute; top: 0; left: 0.08in; width: 1.8in; height: 0.55in; object-fit: contain; object-position: bottom left; }
+.official-report__signature-line { width: 2.6in; border-top: 1px solid #111827; margin-bottom: 0.04in; }
+.official-report__signer > span { font-size: 8pt; }
+.official-report__stamp { position: relative; display: flex; width: 1.25in; height: 1.25in; flex: 0 0 auto; align-items: center; justify-content: center; border: 2px dotted #94a3b8; border-radius: 50%; color: #64748b; font-size: 8pt; font-weight: 600; text-align: center; }
+.official-report__stamp--image { border: 0; }
+.official-report__stamp img { width: 100%; height: 100%; object-fit: contain; }
+.official-report__cc { margin-top: 0.35in; font-size: 9.5pt; }
+.official-report__footer { display: flex; justify-content: space-between; margin-top: 0.6in; padding-top: 0.08in; border-top: 2px solid #111827; font-size: 9pt; }
+
+.vice-president-report-shell {
+  display: none;
+}
+
+.academic-directorate-report-print-shell {
+  display: none;
+}
+
+.vice-president-report {
+  max-width: 8.27in;
+  margin: 0 auto;
+  padding: 0.3in 0.42in;
+  color: #111827;
+  background: #fff;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 9.5pt;
+  line-height: 1.25;
+}
+
+.vice-president-report__header { display: grid; grid-template-columns: minmax(0, 1fr) 0.67in minmax(0, 1fr); align-items: center; gap: 0.12in; }
+.vice-president-report__crest { grid-column: 2; grid-row: 1; width: 0.67in; height: 0.67in; justify-self: center; object-fit: contain; }
+.vice-president-report__university { min-width: 0; }
+.vice-president-report__university--english { grid-column: 1; grid-row: 1; text-align: left; }
+.vice-president-report__university--amharic { grid-column: 3; grid-row: 1; text-align: right; }
+.vice-president-report__university h1 { margin: 0; font-size: 11pt; text-transform: uppercase; }
+.vice-president-report__university p { margin: 0.02in 0; font-size: 9pt; }
+.vice-president-report__reference { display: flex; justify-content: space-between; gap: 0.15in; margin-top: 0.08in; font-size: 8.5pt; }
+.vice-president-report__rule { margin: 0.1in 0 0; border-top: 1px solid #475569; border-bottom: 2px solid #111827; height: 4px; }
+.vice-president-report__subject { margin: 0.12in 0 !important; font-size: 10pt !important; text-decoration: none !important; }
+.vice-president-report__recipient { margin: 0.08in 0; }
+.vice-president-report__candidate { display: grid; grid-template-columns: 1fr 1fr; gap: 0.02in 0.2in; padding: 0.08in 0.1in; border: 1px solid #9ca3af; }
+.vice-president-report__candidate p { margin: 0.02in 0; }
+.vice-president-report h2 { margin: 0.12in 0 0.06in; font-size: 10.5pt; }
+.vice-president-report__table { width: 100%; border-collapse: collapse; }
+.vice-president-report__table th, .vice-president-report__table td { border: 1px solid #4b5563; padding: 3px 4px; text-align: left; }
+.vice-president-report__table th { background: #f3f4f6; }
+.vice-president-report__table th:nth-child(n+2), .vice-president-report__table td:nth-child(n+2) { text-align: center; }
+.vice-president-report__subtotal td { font-weight: 700; background: #f3f4f6; }
+.vice-president-report__final-total td { font-weight: 700; background: #eaf2ff; border-top: 2px solid #1e3a8a; }
+.vice-president-report__final-result { margin: 0.1in 0; padding: 0.08in 0.1in; border-top: 2px solid #111827; border-bottom: 2px solid #111827; font-size: 11pt; }
+.vice-president-report__footer { display: grid; grid-template-columns: 1fr 1fr 1in; align-items: end; gap: 0.2in; margin-top: 0.28in; }
+.vice-president-report__signature { position: relative; display: flex; flex-direction: column; gap: 0.025in; font-size: 8.5pt; }
+.vice-president-report__signature-image { width: 1.8in; height: 0.48in; object-fit: contain; object-position: bottom left; }
+.vice-president-report__line { width: 2.3in; margin-top: 0.02in; border-bottom: 1px solid #111827; }
+.vice-president-report__seal { display: flex; width: 0.95in; height: 0.95in; align-items: center; justify-content: center; justify-self: end; border: 1.5px dashed #4b5563; border-radius: 50%; color: #4b5563; font-size: 6.5pt; text-align: center; }
+.vice-president-report__seal--image { border: 0; }
+.vice-president-report__seal img { width: 100%; height: 100%; object-fit: contain; }
+.vice-president-report__cc { margin-top: 0.18in; padding-top: 0.06in; border-top: 1px solid #9ca3af; font-size: 8pt; }
+
+@media print {
+  @page { size: A4 portrait; margin: 8mm; }
+
+  html,
+  body,
+  body.printing-vice-president-report,
+  body.printing-vice-president-report #root {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+
+  body.printing-vice-president-report * { visibility: hidden !important; }
+  body.printing-vice-president-report #printable-academic-report,
+  body.printing-vice-president-report #printable-academic-report * { visibility: visible !important; }
+  body.printing-vice-president-report #printable-academic-report {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    display: block !important;
+    visibility: visible !important;
+    width: 100% !important;
+    background: #fff !important;
+    z-index: 99999 !important;
+  }
+  body.printing-vice-president-report #printable-academic-report .vice-president-report { display: block !important; visibility: visible !important; }
+  body.printing-vice-president-report .vice-president-report {
+    width: 100%;
+    height: 281mm;
+    max-width: none;
+    min-height: 0;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 1mm;
+    font-size: 8.5pt;
+    line-height: 1.2;
+    overflow: hidden;
+    background: #fff !important;
+    color: #111827 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  body.printing-vice-president-report .vice-president-report__header { grid-template-columns: minmax(0, 1fr) 16mm minmax(0, 1fr); gap: 2mm; }
+  body.printing-vice-president-report .vice-president-report__crest { width: 16mm; height: 16mm; }
+  body.printing-vice-president-report .vice-president-report__university h1 { font-size: 9pt; }
+  body.printing-vice-president-report .vice-president-report__university p { font-size: 7.5pt; }
+  body.printing-vice-president-report .vice-president-report__rule { border-top: 1px solid #64748b !important; border-bottom: 2px solid #111827 !important; }
+  body.printing-vice-president-report .vice-president-report__table { margin: 0.12in 0; font-size: 7.5pt; }
+  body.printing-vice-president-report .vice-president-report__table th,
+  body.printing-vice-president-report .vice-president-report__table td,
+  body.printing-vice-president-report .vice-president-report__final-total td { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  body.printing-vice-president-report .vice-president-report__reference { font-size: 8pt; }
+  body.printing-vice-president-report .vice-president-report__footer { margin-top: 0.18in; }
+  body.printing-vice-president-report .vice-president-report__signature-image,
+  body.printing-vice-president-report .vice-president-report__seal img { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  body.printing-vice-president-report .vice-president-report__cc { margin-top: 0.12in; font-size: 7.5pt; }
+  body.printing-vice-president-report .vice-president-report > * { break-inside: avoid; }
+  body.printing-vice-president-report .vice-president-report__table tr,
+  body.printing-vice-president-report .vice-president-report__signature,
+  body.printing-vice-president-report .vice-president-report__identity { break-inside: avoid; }
+}
+
+@media print {
+  .printing-evaluation-letter #root > div > *:not(.evaluation-letter-modal) {
+    display: none !important;
+  }
+
+  html,
+  body,
+  body.printing-evaluation-letter,
+  body.printing-evaluation-letter #root {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .evaluation-letter-modal {
+    position: static !important;
+    display: block !important;
+    padding: 0 !important;
+    background: transparent !important;
+  }
+
+  .evaluation-letter-modal__dialog {
+    max-height: none !important;
+    max-width: none !important;
+    overflow: visible !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .evaluation-letter-modal__actions {
+    display: none !important;
+  }
+
+  .evaluation-letter-modal__body {
+    display: block !important;
+    width: 8.27in !important;
+    height: 11.69in !important;
+    max-width: none !important;
+    box-sizing: border-box !important;
+    padding: 0.3in 0.42in !important;
+    overflow: hidden !important;
+    font-size: 9.5pt !important;
+    line-height: 1.25 !important;
+  }
+
+  .printing-evaluation-letter .official-report__brand-mark { width: 0.58in; height: 0.58in; }
+  .printing-evaluation-letter .evaluation-letter-modal__body > .official-report { max-width: none; margin: 0; padding: 0; }
+  .printing-evaluation-letter .official-report__header { grid-template-columns: 0.65in 1fr 2.05in; gap: 0.12in; }
+  .printing-evaluation-letter .official-report h1 { font-size: 14pt; }
+  .printing-evaluation-letter .official-report__amharic { font-size: 8pt; }
+  .printing-evaluation-letter .official-report__table { margin: 0.12in 0; font-size: 7.5pt; page-break-inside: avoid; }
+  .printing-evaluation-letter .official-report__table th,
+  .printing-evaluation-letter .official-report__table td { padding: 3px 4px; }
+  .printing-evaluation-letter .official-report__signature { margin-top: 0.18in; }
+  .printing-evaluation-letter .official-report__stamp { width: 0.95in; height: 0.95in; font-size: 6.5pt; }
+  .printing-evaluation-letter .official-report > * { break-inside: avoid; }
+}
+
+@media print {
+  @page { size: A4; margin: 0; }
+  html,
+  body,
+  body.printing-official-report,
+  body.printing-official-report #root {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  body.printing-official-report #root * { visibility: hidden !important; }
+  body.printing-official-report #root .official-report-shell,
+  body.printing-official-report #root .official-report-shell * { visibility: visible !important; }
+  body.printing-official-report #root .printable-certificate-container,
+  body.printing-official-report #root .printable-certificate-container * { visibility: visible !important; }
+  body.printing-official-report #root .printable-certificate-container { display: block !important; position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; background: #fff; color: #000; }
+  body.printing-official-report #root .official-report-shell { display: block !important; position: absolute; inset: 0; width: 100%; overflow: visible !important; }
+    body.printing-evaluation-letter #root .printable-certificate-container,
+    body.printing-evaluation-letter #root .printable-certificate-container * { visibility: visible !important; }
+    body.printing-evaluation-letter #root .printable-certificate-container { display: block !important; position: absolute !important; left: 0 !important; top: 0 !important; width: 100% !important; margin: 0 !important; padding: 0 !important; background: #fff !important; color: #000 !important; }
+  body.printing-official-report .official-report { width: 8.27in; height: 11.69in; max-width: none; min-height: 0; box-sizing: border-box; padding: 0.3in 0.42in; font-size: 9.5pt; line-height: 1.25; overflow: hidden; }
+  body.printing-official-report .official-report__header { grid-template-columns: 0.65in 1fr 2.05in; gap: 0.12in; }
+  body.printing-official-report .official-report__brand-mark { width: 0.58in; height: 0.58in; }
+  body.printing-official-report .official-report h1 { font-size: 14pt; }
+  body.printing-official-report .official-report__amharic { font-size: 8pt; }
+  body.printing-official-report .official-report__meta { gap: 0.16in; font-size: 8.5pt; }
+  body.printing-official-report .official-report__reference { margin-top: 0.04in; font-size: 8.5pt; }
+  body.printing-official-report .official-report__details { padding: 0.08in 0.12in; }
+  body.printing-official-report .official-report__details p { margin: 0.02in 0; }
+  body.printing-official-report .official-report h2 { margin: 0.12in 0 0.06in; font-size: 10.5pt; }
+  body.printing-official-report .official-report__table { margin: 0.12in 0; page-break-inside: avoid; font-size: 7.5pt; }
+  body.printing-official-report .official-report__table th,
+  body.printing-official-report .official-report__table td { padding: 3px 4px; }
+  body.printing-official-report .official-report__summary { padding: 0.06in 0; }
+  body.printing-official-report .official-report__signature { margin-top: 0.18in; }
+  body.printing-official-report .official-report__stamp { width: 0.95in; height: 0.95in; font-size: 6.5pt; }
+  body.printing-official-report .official-report__cc { margin-top: 0.18in; font-size: 8pt; }
+  body.printing-official-report .official-report__footer { margin-top: 0.28in; font-size: 7.5pt; }
+  body.printing-official-report .official-report > * { break-inside: avoid; }
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 8mm 10mm;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100% !important;
+    overflow: hidden !important;
+    background: #ffffff !important;
+  }
+
+  body.printing-official-report nav,
+  body.printing-official-report sidebar,
+  body.printing-official-report > header,
+  body.printing-official-report .no-print {
+    display: none !important;
+  }
+
+  body.printing-official-report .official-report-shell,
+  body.printing-official-report .printable-certificate-container {
+    display: block !important;
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+  }
+
+  body.printing-official-report .print-container {
+    width: 100% !important;
+    max-width: none !important;
+    height: 281mm !important;
+    max-height: 281mm !important;
+    margin: 0 !important;
+    padding: 4mm 1mm !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    page-break-inside: avoid !important;
+    page-break-after: avoid !important;
+    page-break-before: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  body.printing-official-report .print-container .official-report__table {
+    margin: 2.5mm 0 !important;
+    font-size: 7.2pt !important;
+  }
+
+  body.printing-official-report .print-container .official-report__table th,
+  body.printing-official-report .print-container .official-report__table td {
+    padding: 2px 3px !important;
+  }
+
+  body.printing-official-report .print-container .official-report__header {
+    grid-template-columns: minmax(0, 1fr) 0.7in minmax(0, 1fr) !important;
+    gap: 0.12in !important;
+  }
+
+  body.printing-official-report .print-container .official-report__brand-mark {
+    width: 0.7in !important;
+    height: 0.7in !important;
+  }
+
+  body.printing-official-report .print-container .official-report__rule,
+  body.printing-official-report .print-container .official-report__table th,
+  body.printing-official-report .print-container .official-report__details,
+  body.printing-official-report .print-container .official-report__stamp {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body.printing-official-report .print-container .official-report__signature {
+    margin-top: 3mm !important;
+  }
+
+  body.printing-official-report .print-container .official-report__stamp {
+    width: 0.95in !important;
+    height: 0.95in !important;
+  }
+
+  body.printing-official-report .print-container .official-report__signature-image,
+  body.printing-official-report .print-container .official-report__stamp img {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body.printing-official-report .print-container .official-report__cc {
+    margin-top: 3mm !important;
+    font-size: 7.5pt !important;
+  }
+
+  body.printing-official-report .print-container .official-report__footer {
+    margin-top: 3mm !important;
+  }
+
+  body.printing-evaluation-letter .evaluation-letter-modal,
+  body.printing-evaluation-letter .evaluation-letter-modal__dialog {
+    display: contents !important;
+  }
+
+  body.printing-evaluation-letter .evaluation-letter-modal__actions {
+    display: none !important;
+  }
+
+  body.printing-evaluation-letter .official-report-shell,
+  body.printing-evaluation-letter .printable-certificate-container {
+    display: block !important;
+  }
+
+  body.printing-evaluation-letter .evaluation-letter-modal__body > .official-report {
+    width: 100% !important;
+    max-width: none !important;
+    height: 281mm !important;
+    max-height: 281mm !important;
+    overflow: hidden !important;
+    padding: 4mm 1mm !important;
+    font-size: 9pt !important;
+    line-height: 1.25 !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    break-inside: avoid !important;
+  }
+
+  body.printing-evaluation-letter .official-report__header {
+    grid-template-columns: minmax(0, 1fr) 0.7in minmax(0, 1fr) !important;
+    gap: 0.12in !important;
+  }
+
+  body.printing-evaluation-letter .official-report__brand-mark {
+    width: 0.7in !important;
+    height: 0.7in !important;
+  }
+
+  body.printing-evaluation-letter .official-report__table {
+    margin: 2.5mm 0 !important;
+    font-size: 7.2pt !important;
+  }
+
+  body.printing-evaluation-letter .official-report__table th,
+  body.printing-evaluation-letter .official-report__table td {
+    padding: 2px 3px !important;
+  }
+
+  body.printing-evaluation-letter .official-report__signature {
+    margin-top: 3mm !important;
+  }
+
+  body.printing-evaluation-letter .official-report__signature-image,
+  body.printing-evaluation-letter .official-report__stamp img {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body.printing-evaluation-letter .official-report__cc,
+  body.printing-evaluation-letter .official-report__footer {
+    margin-top: 3mm !important;
+  }
+}

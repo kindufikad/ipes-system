@@ -1,0 +1,210 @@
+.publish-evaluation-form {
+  display: grid;
+  gap: 1rem;
+  padding: 1.25rem;
+  border: 1px solid #dbe3ed;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #fff, #f8fafc);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+}
+
+.publish-evaluation-form__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.publish-evaluation-form__eyebrow {
+  margin: 0 0 0.3rem;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #3b82f6;
+}
+
+.publish-evaluation-form__header h2 {
+  margin: 0;
+  font-size: 1.6rem;
+  line-height: 1.2;
+  color: #0f172a;
+}
+
+.publish-evaluation-form__content {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
+  gap: 1rem;
+}
+
+.publish-evaluation-form__panel {
+  padding: 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.publish-evaluation-form__panel--alert {
+  background: linear-gradient(180deg, #fff7f7, #fff);
+  border-color: #fecaca;
+}
+
+.publish-evaluation-form__field {
+  display: grid;
+  gap: 0.45rem;
+  color: #475569;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.publish-evaluation-form__field input {
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid #dbe3ed;
+  border-radius: 10px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+}
+
+.publish-evaluation-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.publish-evaluation-form__status-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.publish-evaluation-form__status-row > div {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.8rem 0.7rem;
+  border: 1px solid #edf1f5;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.publish-evaluation-form__status-row strong {
+  color: #64748b;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.publish-evaluation-form__status-row span {
+  color: #0f172a;
+  font-weight: 700;
+  font-size: 0.74rem;
+}
+
+.publish-evaluation-form__warning,
+.publish-evaluation-form__info {
+  margin-top: 0.8rem;
+  padding: 0.8rem 0.9rem;
+  border-radius: 10px;
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.publish-evaluation-form__warning {
+  border: 1px solid #fecaca;
+  background: #fff1f2;
+  color: #be123c;
+  font-weight: 700;
+}
+
+.publish-evaluation-form__info {
+  border: 1px solid #dbeafe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.publish-evaluation-form__toast {
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  background: #ecfdf5;
+  color: #166534;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.soc-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2rem;
+  padding: 0.38rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.soc-badge--success {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #047857;
+}
+
+.soc-badge--danger {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.soc-badge--gray {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  color: #475569;
+}
+
+.soc-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2.3rem;
+  padding: 0.48rem 0.8rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-size: 0.72rem;
+  font-weight: 750;
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.soc-button:hover:not(:disabled) { transform: translateY(-1px); }
+.soc-button:disabled { opacity: 0.6; cursor: not-allowed; }
+.soc-button--primary {
+  background: #2563eb;
+  color: #fff;
+}
+.soc-button--subtle {
+  border-color: #dbe3ed;
+  background: #fff;
+  color: #475569;
+}
+
+@media (max-width: 760px) {
+  .publish-evaluation-form__content {
+    grid-template-columns: 1fr;
+  }
+
+  .publish-evaluation-form__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .publish-evaluation-form__status-row {
+    grid-template-columns: 1fr;
+  }
+}
