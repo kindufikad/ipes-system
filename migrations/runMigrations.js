@@ -460,9 +460,21 @@ const run = async () => {
       await conn.query('ALTER TABLE peer_evaluations MODIFY COLUMN evaluatee_id INT UNSIGNED DEFAULT NULL');
     }
 
+    await conn.query(`CREATE TABLE IF NOT EXISTS system_settings (
+      setting_key VARCHAR(128) PRIMARY KEY,
+      setting_value TEXT NULL,
+      is_system_locked TINYINT(1) NOT NULL DEFAULT 0,
+      lock_reason VARCHAR(500) NOT NULL DEFAULT 'System temporarily locked by System Admin',
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     await conn.query(`ALTER TABLE system_settings
       ADD COLUMN IF NOT EXISTS is_system_locked TINYINT(1) NOT NULL DEFAULT 0,
       ADD COLUMN IF NOT EXISTS lock_reason VARCHAR(500) NOT NULL DEFAULT 'System temporarily locked by System Admin'`);
+    await conn.query(`
+      INSERT INTO system_settings (setting_key, setting_value)
+      VALUES ('SMTP_HOST', 'smtp.gmail.com'), ('SMTP_PORT', '587'), ('SMTP_USER', NULL), ('SMTP_PASS', NULL)
+      ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key)
+    `);
     await conn.query(`
       INSERT INTO system_settings (setting_key, setting_value, is_system_locked, lock_reason)
       VALUES ('system_access_control', NULL, 0, 'System temporarily locked by System Admin')

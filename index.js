@@ -152,6 +152,22 @@ app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAu
   }
 
   try {
+    const [[activePeriod]] = await pool.query(
+      `SELECT academic_year, semester
+       FROM evaluation_periods
+       WHERE LOWER(status) = 'active'
+       ORDER BY id DESC
+       LIMIT 1`
+    );
+    const resolvedAcademicYear = academicYear || String(activePeriod?.academic_year || '').trim();
+    const resolvedSemester = semester || String(activePeriod?.semester || '').trim();
+    const issuedAt = new Date().toISOString();
+    const issuedDate = issuedAt.slice(0, 10).replace(/-/g, '');
+    const referencePeriod = [resolvedAcademicYear, resolvedSemester]
+      .filter(Boolean)
+      .join('-')
+      .replace(/[^A-Za-z0-9-]+/g, '-');
+    const referenceNumber = `MAU/RESULT/${referencePeriod ? `${referencePeriod}/` : ''}${issuedDate}/${instructorId}`;
     const requestedTargetRole = String(req.query.target_role || '').trim().toLowerCase().replace(' ', '_');
     const targetTable = requestedTargetRole === 'lab_assistant' ? 'lab_assistants' : 'instructors';
     const targetIdColumn = targetTable === 'lab_assistants' ? 'la.id' : 'i.id';
@@ -178,17 +194,29 @@ app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAu
     if (!resolvedTarget) return res.status(404).json({ success: false, message: 'Instructor or Lab Assistant not found.' });
 
     if (resolvedTarget.target_role === 'instructor') {
-      const metrics = await getInstructorOverallPerformance({ instructorId, academicYear, semester });
+      const metrics = await getInstructorOverallPerformance({
+        instructorId,
+        academicYear: resolvedAcademicYear,
+        semester: resolvedSemester,
+      });
       const studentCount = Number(metrics.student?.count || 0);
       const peerCount = Number(metrics.peer?.count || 0);
       return res.json({
         success: true,
         instructor_id: metrics.instructorId,
         instructor_name: metrics.instructorName,
+        full_name: metrics.instructorName,
+        name: metrics.instructorName,
         department_name: metrics.department,
         college_name: metrics.college_name,
         academic_year: metrics.academicYear,
         semester: metrics.semester,
+        academic_period: {
+          academic_year: metrics.academicYear,
+          semester: metrics.semester,
+        },
+        issued_at: issuedAt,
+        reference_number: referenceNumber,
         student_average: metrics.studentRaw,
         student_raw_percentage: metrics.studentRaw,
         student_weighted: metrics.studentWeighted,
@@ -219,6 +247,8 @@ app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAu
         can_print: metrics.isComplete,
         hasCourseAssigned: Boolean(metrics.hasAssignedCourse),
         has_course_assigned: Boolean(metrics.hasAssignedCourse),
+        has_assigned_courses: Boolean(metrics.hasAssignedCourse),
+        weights: metrics.weights,
         total_score: metrics.totalScore,
         final_score: metrics.totalScore,
         classification: metrics.classification,
@@ -242,8 +272,8 @@ app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAu
       const evaluated = await getLabAssistantPerformance({
         staffId: profile.id,
         userId: profile.user_id,
-        academicYear,
-        semester,
+        academicYear: resolvedAcademicYear,
+        semester: resolvedSemester,
       });
       const { studentScore: studentRaw, peerScore: peerRaw, deptHeadScore: deptHeadRaw } = evaluated;
       const { studentWeighted, deptHeadWeighted, peerWeighted, totalScore, isComplete } = evaluated;
@@ -254,8 +284,14 @@ app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAu
         department_name: profile.department_name,
         college_name: profile.college_name,
         target_role: 'lab_assistant',
-        academic_year: academicYear,
-        semester,
+        academic_year: resolvedAcademicYear,
+        semester: resolvedSemester,
+        academic_period: {
+          academic_year: resolvedAcademicYear,
+          semester: resolvedSemester,
+        },
+        issued_at: issuedAt,
+        reference_number: referenceNumber,
         student_average: studentRaw,
         student_raw_percentage: studentRaw,
         student_weighted: studentWeighted,
@@ -1001,6 +1037,17 @@ const initializeSchema = async () => {
     ADD COLUMN IF NOT EXISTS route_path VARCHAR(512) DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS http_method VARCHAR(12) DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS status_code SMALLINT UNSIGNED DEFAULT NULL`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS admin_email_verifications (
+    user_id INT UNSIGNED PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    code_hash VARCHAR(255) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_admin_email_verifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_admin_email_verifications_expiry (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
   await pool.query(`CREATE TABLE IF NOT EXISTS system_settings (
     setting_key VARCHAR(128) PRIMARY KEY,

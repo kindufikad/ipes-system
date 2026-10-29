@@ -2,8 +2,9 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-const { getAdminDashboardStats, getDepartmentAnalytics, getSecurityLogs, exportSecurityLogs, getDatabaseHealth, getSystemHealth, triggerBackup, updateBackupRetention, updateSystemLock, cleanupSecurityLogs, createCollege, getColleges, getDepartmentsByCollege, getCollegesWithDepartments, getManagementRoleOccupant, assignRoleWithHierarchy, resetManagementRole, resetUserPassword, updateUserByAdmin, toggleUserArchive, deleteUserByAdmin, getRoleCandidates, getLandingContentAdmin, updateLandingContent, deleteLandingContent, getLandingPageSettingsAdmin, createLandingPageSetting, updateLandingPageSettings, deleteLandingPageSetting, getContactSettings, updateContactSetting, getAutoLockDeadlineSetting, updateAutoLockDeadlineSetting, getEmailServiceSettings, updateEmailServiceSettings, sendAdminProfileEmailVerification, updateAdminProfile } = require('../controllers/adminController');
+const { getAdminDashboardStats, getDepartmentAnalytics, getSecurityLogs, getAdminAuditLogs, exportSecurityLogs, getDatabaseHealth, getSystemHealth, triggerBackup, updateBackupRetention, updateSystemLock, cleanupSecurityLogs, createCollege, getColleges, getDepartmentsByCollege, getCollegesWithDepartments, getManagementRoleOccupant, assignRoleWithHierarchy, resetManagementRole, resetUserPassword, updateUserByAdmin, toggleUserArchive, deleteUserByAdmin, getRoleCandidates, getLandingContentAdmin, updateLandingContent, deleteLandingContent, getLandingPageSettingsAdmin, createLandingPageSetting, updateLandingPageSettings, deleteLandingPageSetting, getContactSettings, updateContactSetting, getAutoLockDeadlineSetting, updateAutoLockDeadlineSetting, getEmailServiceSettings, updateEmailServiceSettings, sendAdminProfileEmailVerification, updateAdminProfile } = require('../controllers/adminController');
 const { getDatabaseHealth: getSystemAdminDatabaseHealth, getSystemHealth: getSystemAdminSystemHealth } = require('../controllers/systemAdminController');
+const { getAdminChatAssistant } = require('../controllers/adminChatAssistantController');
 const { changePassword } = require('../controllers/authController');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { sendBotBroadcast } = require('../controllers/broadcastController');
@@ -22,6 +23,9 @@ const landingUpload = multer({
 });
 
 router.get('/dashboard-stats', authenticateToken, authorizeRoles('admin', 'systemadmin'), getAdminDashboardStats);
+router.get('/stats', authenticateToken, authorizeRoles('admin', 'system_admin', 'System Administrator', 'systemadmin'), getAdminDashboardStats);
+router.get('/audit-logs', authenticateToken, authorizeRoles('admin', 'system_admin', 'System Administrator', 'systemadmin'), getAdminAuditLogs);
+router.post('/chat-assistant', authenticateToken, authorizeRoles('admin', 'system_admin', 'System Administrator', 'systemadmin'), getAdminChatAssistant);
 router.get('/department-analytics', authenticateToken, authorizeRoles('admin', 'systemadmin'), getDepartmentAnalytics);
 router.get('/security-logs/export', authenticateToken, authorizeRoles('admin', 'systemadmin'), exportSecurityLogs);
 router.get('/security-logs', authenticateToken, authorizeRoles('admin', 'systemadmin'), getSecurityLogs);
@@ -47,6 +51,8 @@ router.post('/profile/email-verification', authenticateToken, authorizeRoles('ad
 router.put('/profile', authenticateToken, authorizeRoles('admin', 'systemadmin'), updateAdminProfile);
 router.get('/email-service-settings', authenticateToken, authorizeRoles('admin', 'systemadmin'), getEmailServiceSettings);
 router.put('/email-service-settings', authenticateToken, authorizeRoles('admin', 'systemadmin'), updateEmailServiceSettings);
+router.get('/smtp-settings', authenticateToken, authorizeRoles('admin', 'systemadmin', 'system_admin'), getEmailServiceSettings);
+router.post('/smtp-settings', authenticateToken, authorizeRoles('admin', 'systemadmin', 'system_admin'), updateEmailServiceSettings);
 router.get('/evaluation-auto-lock', authenticateToken, authorizeRoles('admin', 'systemadmin'), getAutoLockDeadlineSetting);
 router.post('/evaluation-auto-lock', authenticateToken, authorizeRoles('admin', 'systemadmin'), updateAutoLockDeadlineSetting);
 router.put('/evaluation-auto-lock', authenticateToken, authorizeRoles('admin', 'systemadmin'), updateAutoLockDeadlineSetting);

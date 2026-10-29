@@ -8,9 +8,11 @@ const {
   createEmailTransporter,
   encryptSmtpPassword,
   getEmailConfigFromDatabase,
+  getEmailDeliveryErrorCode,
+  logEmailDeliveryFailure,
   SMTP_SETTING_KEYS,
   verifyEmailTransporter,
-} = require('../services/emailService');
+} = require('../utils/emailService');
 const { getSystemHealthSnapshot, triggerDatabaseBackup } = require('../middleware/systemHealth');
 const { SYSTEM_ADMIN_CONFLICT_MESSAGE, getActiveSystemAdmin, isActiveSystemAdminUniqueError, isSystemAdminRole } = require('../utils/systemAdminPolicy');
 const { getInstitutionalEvaluationMetrics } = require('./aiInsightsController');
@@ -24,8 +26,21 @@ const contactSettingKeys = new Set(['contact_email', 'contact_phone', 'contact_o
 const ADMIN_EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@(gmail\.com|mkau\.edu\.et)$/;
 const smtpEmailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const getEmailServiceSettings = async (_req, res) => {
+const isActiveEmailAdmin = async (req) => {
+  const adminId = Number(req.user?.id);
+  if (!Number.isInteger(adminId) || adminId <= 0) return false;
+  const [[admin]] = await pool.query(
+    "SELECT id FROM users WHERE id = ? AND LOWER(role) IN ('admin', 'systemadmin', 'system_admin') AND LOWER(COALESCE(status, 'active')) = 'active' LIMIT 1",
+    [adminId]
+  );
+  return Boolean(admin);
+};
+
+const getEmailServiceSettings = async (req, res) => {
   try {
+    if (!await isActiveEmailAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'An active System Admin account is required.' });
+    }
     const keys = Object.values(SMTP_SETTING_KEYS);
     const [rows] = await pool.query(
       `SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN (${keys.map(() => '?').join(', ')})`,
@@ -35,10 +50,13 @@ const getEmailServiceSettings = async (_req, res) => {
     return res.json({
       success: true,
       data: {
-        senderEmail: settings[SMTP_SETTING_KEYS.senderEmail] || '',
-        host: settings[SMTP_SETTING_KEYS.host] || 'smtp.gmail.com',
-        port: Number(settings[SMTP_SETTING_KEYS.port] || 587),
-        appPasswordConfigured: Boolean(settings[SMTP_SETTING_KEYS.appPassword]),
+        senderEmail: settings[SMTP_SETTING_KEYS.senderEmail] || settings[SMTP_SETTING_KEYS.legacySenderEmail] || '',
+        SMTP_USER: settings[SMTP_SETTING_KEYS.senderEmail] || settings[SMTP_SETTING_KEYS.legacySenderEmail] || '',
+        host: settings[SMTP_SETTING_KEYS.host] || settings[SMTP_SETTING_KEYS.legacyHost] || 'smtp.gmail.com',
+        port: Number(settings[SMTP_SETTING_KEYS.port] || settings[SMTP_SETTING_KEYS.legacyPort] || 587),
+        SMTP_HOST: settings[SMTP_SETTING_KEYS.host] || settings[SMTP_SETTING_KEYS.legacyHost] || 'smtp.gmail.com',
+        SMTP_PORT: Number(settings[SMTP_SETTING_KEYS.port] || settings[SMTP_SETTING_KEYS.legacyPort] || 587),
+        appPasswordConfigured: Boolean(settings[SMTP_SETTING_KEYS.appPassword] || settings[SMTP_SETTING_KEYS.legacyAppPassword]),
       },
     });
   } catch (error) {
@@ -48,10 +66,10 @@ const getEmailServiceSettings = async (_req, res) => {
 };
 
 const updateEmailServiceSettings = async (req, res) => {
-  const senderEmail = String(req.body?.senderEmail || '').trim().toLowerCase();
-  const host = String(req.body?.host || 'smtp.gmail.com').trim();
-  const port = Number(req.body?.port || 587);
-  const appPassword = String(req.body?.appPassword || '').replace(/\s/g, '');
+  const senderEmail = String(req.body?.SMTP_USER ?? req.body?.senderEmail ?? '').trim().toLowerCase();
+  const host = String(req.body?.SMTP_HOST ?? req.body?.host ?? 'smtp.gmail.com').trim();
+  const port = Number(req.body?.SMTP_PORT ?? req.body?.port ?? 587);
+  const appPassword = String(req.body?.SMTP_PASS ?? req.body?.appPassword ?? '').replace(/\s+/g, '');
   if (!smtpEmailRegex.test(senderEmail) || senderEmail.length > 255) {
     return res.status(400).json({ success: false, message: 'Enter a valid SMTP sender email address.' });
   }
@@ -68,11 +86,14 @@ const updateEmailServiceSettings = async (req, res) => {
   let connection;
   let transactionStarted = false;
   try {
-    const [[storedPassword]] = await pool.query(
-      'SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1',
-      [SMTP_SETTING_KEYS.appPassword]
+    if (!await isActiveEmailAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'An active System Admin account is required.' });
+    }
+    const [storedPasswords] = await pool.query(
+      'SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN (?, ?)',
+      [SMTP_SETTING_KEYS.appPassword, SMTP_SETTING_KEYS.legacyAppPassword]
     );
-    if (!appPassword && !storedPassword?.setting_value) {
+    if (!appPassword && !storedPasswords.some((setting) => setting.setting_value)) {
       return res.status(400).json({ success: false, message: 'Enter the SMTP App Password to configure email service.' });
     }
     const settings = [
@@ -96,7 +117,7 @@ const updateEmailServiceSettings = async (req, res) => {
     return res.json({
       success: true,
       message: 'Email Service Settings saved securely.',
-      data: { senderEmail, host, port, appPasswordConfigured: true },
+      data: { senderEmail, SMTP_USER: senderEmail, host, port, SMTP_HOST: host, SMTP_PORT: port, appPasswordConfigured: true },
     });
   } catch (error) {
     if (transactionStarted) await connection.rollback().catch(() => {});
@@ -119,8 +140,6 @@ const sendAdminProfileEmailVerification = async (req, res) => {
   let codeHash;
   let verificationCode;
   let otpStored = false;
-  const devOtpBypass = process.env.NODE_ENV === 'development'
-    && process.env.EMAIL_VERIFICATION_DEV_BYPASS === 'true';
   try {
     const [[admin]] = await pool.query(
       "SELECT id, email FROM users WHERE id = ? AND LOWER(role) = 'admin' AND LOWER(COALESCE(status, 'active')) = 'active' LIMIT 1",
@@ -148,7 +167,6 @@ const sendAdminProfileEmailVerification = async (req, res) => {
     );
     otpStored = true;
 
-    if (devOtpBypass) console.warn(`[DEV ONLY] Admin email verification OTP for ${email}: ${verificationCode}`);
     emailTransport = createEmailTransporter(await getEmailConfigFromDatabase(pool));
     await verifyEmailTransporter(emailTransport.transporter);
     const delivery = await emailTransport.transporter.sendMail({
@@ -160,10 +178,6 @@ const sendAdminProfileEmailVerification = async (req, res) => {
     if (!delivery?.messageId) throw new Error('SMTP accepted no message identifier for the verification email.');
     return res.json({ success: true, message: 'A 6-digit verification code has been sent to the new email address.' });
   } catch (error) {
-    if (devOtpBypass && otpStored) {
-      console.warn('SMTP delivery failed; the development OTP remains valid for offline verification.');
-      return res.json({ success: true, message: 'Development verification code logged by the backend.', devBypass: true });
-    }
     if (otpStored) {
       try {
         await pool.query('DELETE FROM admin_email_verifications WHERE user_id = ? AND email = ? AND code_hash = ?', [adminId, email, codeHash]);
@@ -171,14 +185,36 @@ const sendAdminProfileEmailVerification = async (req, res) => {
         console.error('Unable to clean up undelivered admin email verification code:', cleanupError?.message);
       }
     }
-    console.error('Admin profile email verification delivery failed:', { code: error?.code, message: error?.message });
-    if (error?.code === 'EAUTH' || error?.responseCode === 535 || ['EMAIL_CONFIG_INVALID', 'EMAIL_CONFIG_MISSING'].includes(error?.code)) {
-      return res.status(400).json({ success: false, message: 'Invalid SMTP configuration or App Password in System Settings' });
+    logEmailDeliveryFailure(error, 'admin profile email verification');
+    const deliveryErrorCode = getEmailDeliveryErrorCode(error);
+    const respondWithEmailDeliveryError = (status, code, message) => res.status(status).json({
+      success: false,
+      code,
+      message,
+      supportAction: 'A System Admin can review sanitized SMTP diagnostics and stored settings, correct the configuration, then request a new verification code. OTPs are not included in diagnostic logs or responses.',
+    });
+    if (deliveryErrorCode === 'EMAIL_CONFIG_MISSING') {
+      return respondWithEmailDeliveryError(503, deliveryErrorCode, 'Email verification is not configured. An active System Admin must set SMTP_HOST, SMTP_PORT, Google Email, and App Password in System Admin Dashboard settings.');
     }
-    const message = error?.code === 'EMAIL_CONFIG_MISSING'
-      ? 'Email service is not configured. Please contact the system administrator.'
-      : 'Unable to deliver the verification code. Please check the email service configuration and try again.';
-    return res.status(500).json({ success: false, message });
+    if (deliveryErrorCode === 'EMAIL_CONFIG_DECRYPTION_FAILED') {
+      return respondWithEmailDeliveryError(503, deliveryErrorCode, 'The saved SMTP App Password cannot be decrypted. Keep EMAIL_SETTINGS_ENCRYPTION_KEY stable, then re-enter and save the Google App Password in Dashboard Settings.');
+    }
+    if (deliveryErrorCode === 'EMAIL_AUTH_FAILED') {
+      return respondWithEmailDeliveryError(503, deliveryErrorCode, 'Google rejected SMTP sign-in. Use a Google App Password (not the account password), enable 2-Step Verification, and ensure SMTP_USER is the same Gmail account that created the 16-character App Password. Re-enter and save it in Dashboard Settings, then request a new code.');
+    }
+    if (deliveryErrorCode === 'EMAIL_CONFIG_INVALID') {
+      return respondWithEmailDeliveryError(503, deliveryErrorCode, 'The saved SMTP settings are invalid. Check that the Gmail host is smtp.gmail.com, the port is 587, the sender email is valid, and the App Password is 16 letters or digits.');
+    }
+    if (deliveryErrorCode === 'EMAIL_RATE_LIMITED') {
+      return respondWithEmailDeliveryError(503, deliveryErrorCode, 'Google temporarily rate-limited verification email delivery. Wait a few minutes, then request a new code.');
+    }
+    if (deliveryErrorCode === 'EMAIL_CONFIG_UNAVAILABLE') {
+      return respondWithEmailDeliveryError(503, deliveryErrorCode, 'Email settings could not be read or securely updated in the database. Please try again or contact the System Administrator.');
+    }
+    if (deliveryErrorCode === 'EMAIL_PROVIDER_UNAVAILABLE') {
+      return respondWithEmailDeliveryError(503, deliveryErrorCode, 'The email provider is temporarily unreachable. Check the network connection and try again.');
+    }
+    return respondWithEmailDeliveryError(500, deliveryErrorCode, 'Unable to deliver the verification code. Please check the email service configuration and try again.');
   } finally {
     if (emailTransport?.transporter) emailTransport.transporter.close();
   }
@@ -257,7 +293,9 @@ const updateAdminProfile = async (req, res) => {
       "UPDATE users SET email = TRIM(LOWER(?)) WHERE id = ? AND role = 'admin'",
       [email, adminId]
     );
-    await connection.query('DELETE FROM admin_email_verifications WHERE user_id = ?', [adminId]);
+    if (emailChanged) {
+      await connection.query('DELETE FROM admin_email_verifications WHERE user_id = ?', [adminId]);
+    }
     await connection.query(
       "UPDATE users SET first_name = ?, last_name = ? WHERE id = ? AND role = 'admin'",
       [firstName, lastName, adminId]
@@ -906,6 +944,43 @@ const getSecurityLogs = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: { en: 'Unable to retrieve security logs.', am: 'የደህንነት መዝገቦችን ማግኘት አልተቻለም።' },
+      data: null,
+    });
+  }
+};
+
+const getAdminAuditLogs = async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query?.limit, 10) || 100));
+    const page = Math.max(1, Number.parseInt(req.query?.page, 10) || 1);
+    const offset = (page - 1) * limit;
+    const { where, values } = getSecurityLogFilter(req.query);
+    const [[auditRows], [countRows]] = await Promise.all([
+      pool.query(`
+        SELECT id, action_title, description, performed_by, ip_address, actor_email, actor_role, category, target_details, route_path, http_method, status_code, created_at
+        FROM audit_logs ${where}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        OFFSET ?
+      `, [...values, limit, offset]),
+      pool.query(`SELECT COUNT(*) AS total FROM audit_logs ${where}`, values),
+    ]);
+
+    return res.json({
+      success: true,
+      message: 'Admin audit events retrieved successfully.',
+      data: {
+        logs: auditRows.map(normalizeAuditLog),
+        totalCount: Number(countRows[0]?.total || 0),
+        page,
+        pageSize: limit,
+      },
+    });
+  } catch (error) {
+    console.error('Unable to retrieve admin audit events:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Unable to retrieve admin audit events.',
       data: null,
     });
   }
@@ -1750,6 +1825,7 @@ module.exports = {
   getAdminDashboardStats,
   getDepartmentAnalytics,
   getSecurityLogs,
+  getAdminAuditLogs,
   exportSecurityLogs,
   getDatabaseHealth,
   getSystemHealth,
